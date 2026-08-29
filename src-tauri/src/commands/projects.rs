@@ -30,6 +30,7 @@ pub struct Project {
     pub notes: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub sort_order: i64,
 }
 
 #[derive(Serialize)]
@@ -71,10 +72,11 @@ fn map_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
         notes: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        sort_order: row.get(9)?,
     })
 }
 
-const PROJECT_COLUMNS: &str = "id, name, description, color, avatar_image_id, favorite, notes, created_at, updated_at";
+const PROJECT_COLUMNS: &str = "id, name, description, color, avatar_image_id, favorite, notes, created_at, updated_at, sort_order";
 
 #[tauri::command]
 pub fn list_projects_with_relations(app: AppHandle, state: State<VaultState>) -> Result<Vec<ProjectWithRelations>, String> {
@@ -82,7 +84,7 @@ pub fn list_projects_with_relations(app: AppHandle, state: State<VaultState>) ->
     let conn = db::open(&app)?;
 
     let projects: Vec<Project> = {
-        let sql = format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY name ASC");
+        let sql = format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY sort_order ASC, name ASC");
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let mapped = stmt.query_map([], map_project).map_err(|e| e.to_string())?;
         mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
@@ -166,15 +168,34 @@ pub fn create_project(app: AppHandle, state: State<VaultState>, input: ProjectFo
     let v = validate_input(&input)?;
     let conn = db::open(&app)?;
     let now = db::now_iso();
+    let next_order: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO projects (name, description, color, avatar_image_id, favorite, notes, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![v.name, v.description, v.color, input.avatar_image_id, input.favorite as i64, v.notes, now, now],
+        "INSERT INTO projects (name, description, color, avatar_image_id, favorite, notes, created_at, updated_at, sort_order) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![v.name, v.description, v.color, input.avatar_image_id, input.favorite as i64, v.notes, now, now, next_order],
     )
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
     tags::sync_tags(&conn, "project_tags", "project_id", id, &input.tags)?;
     Ok(id)
+}
+
+#[tauri::command]
+pub fn reorder_projects(app: AppHandle, state: State<VaultState>, ordered_ids: Vec<i64>) -> Result<(), String> {
+    require_unlocked(&state)?;
+    for id in &ordered_ids {
+        validate::positive_id(*id, "id")?;
+    }
+    let mut conn = db::open(&app)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (index, id) in ordered_ids.iter().enumerate() {
+        tx.execute("UPDATE projects SET sort_order = ?1 WHERE id = ?2", params![index as i64, id])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

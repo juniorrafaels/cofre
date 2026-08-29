@@ -190,6 +190,11 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
     migrate_add_column(conn, "vault_meta", "recovery_key_wrapped_dek", "BLOB")?;
     migrate_add_column(conn, "vault_meta", "recovery_key_check", "BLOB")?;
     migrate_add_column(conn, "vault_meta", "recovery_key_created_at", "TEXT")?;
+    // Ordenação definida pelo usuário (Gerenciamento de Plataformas/Projetos). `backfill_sort_order`
+    // abaixo garante que registros já existentes recebam uma posição inicial compatível com a
+    // ordem em que já apareciam (em vez de todos caírem em 0), e só roda uma única vez por tabela.
+    migrate_add_column(conn, "platforms", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
+    migrate_add_column(conn, "projects", "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
 
     let recovery_row_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM recovery_attempts WHERE id = 1", [], |row| row.get(0))
@@ -199,21 +204,53 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
+    backfill_sort_order(conn, "platforms", "platforms_sort_order_seeded", "SELECT id FROM platforms ORDER BY is_custom ASC, name ASC")?;
+    backfill_sort_order(conn, "projects", "projects_sort_order_seeded", "SELECT id FROM projects ORDER BY name ASC")?;
+
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM platforms", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
 
     if count == 0 {
         let now = now_iso();
-        for (name, icon, login_url, website_url) in DEFAULT_PLATFORMS {
+        for (index, (name, icon, login_url, website_url)) in DEFAULT_PLATFORMS.iter().enumerate() {
             conn.execute(
-                "INSERT INTO platforms (name, icon, login_url, website_url, is_custom, created_at) VALUES (?1, ?2, ?3, ?4, 0, ?5)",
-                rusqlite::params![name, icon, login_url, website_url, now],
+                "INSERT INTO platforms (name, icon, login_url, website_url, is_custom, created_at, sort_order) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+                rusqlite::params![name, icon, login_url, website_url, now, index as i64],
             )
             .map_err(|e| e.to_string())?;
         }
     }
 
+    Ok(())
+}
+
+/// Dá uma posição inicial (`sort_order`) a registros que já existiam antes da coluna existir,
+/// preservando a ordem em que já eram exibidos (`order_sql`). Roda no máximo uma vez por tabela:
+/// a flag em `settings` (`flag_key`) evita que reordenações feitas pelo usuário sejam desfeitas
+/// em uma inicialização futura do app.
+fn backfill_sort_order(conn: &Connection, table: &str, flag_key: &str, order_sql: &str) -> Result<(), String> {
+    let already_seeded: i64 = conn
+        .query_row("SELECT COUNT(*) FROM settings WHERE key = ?1", [flag_key], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if already_seeded > 0 {
+        return Ok(());
+    }
+
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare(order_sql).map_err(|e| e.to_string())?;
+        let mapped = stmt.query_map([], |row| row.get::<_, i64>(0)).map_err(|e| e.to_string())?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            &format!("UPDATE {table} SET sort_order = ?1 WHERE id = ?2"),
+            rusqlite::params![index as i64, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    conn.execute("INSERT INTO settings (key, value) VALUES (?1, '1')", [flag_key])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

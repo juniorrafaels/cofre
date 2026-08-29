@@ -220,7 +220,7 @@ pub fn list_accounts_with_relations(app: AppHandle, state: State<VaultState>, sc
 
     let sql = format!(
         "SELECT {ACCOUNT_COLUMNS}, \
-                p.name, p.icon, p.login_url, p.website_url, p.is_custom, p.logo_image_id, p.created_at \
+                p.name, p.icon, p.login_url, p.website_url, p.is_custom, p.logo_image_id, p.created_at, p.sort_order \
          FROM accounts a \
          LEFT JOIN platforms p ON p.id = a.platform_id \
          {where_clause} \
@@ -240,6 +240,7 @@ pub fn list_accounts_with_relations(app: AppHandle, state: State<VaultState>, sc
                     is_custom: row.get::<_, Option<i64>>(21)?.unwrap_or(0),
                     logo_image_id: row.get(22)?,
                     created_at: row.get::<_, Option<String>>(23)?.unwrap_or_default(),
+                    sort_order: row.get::<_, Option<i64>>(24)?.unwrap_or(0),
                 })
             } else {
                 None
@@ -269,7 +270,7 @@ pub fn list_accounts_with_relations(app: AppHandle, state: State<VaultState>, sc
     {
         let sql = format!(
             "SELECT ap.account_id, pr.{} FROM account_projects ap JOIN projects pr ON pr.id = ap.project_id",
-            "id, name, description, color, avatar_image_id, favorite, notes, created_at, updated_at"
+            "id, name, description, color, avatar_image_id, favorite, notes, created_at, updated_at, sort_order"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let project_rows = stmt
@@ -286,6 +287,7 @@ pub fn list_accounts_with_relations(app: AppHandle, state: State<VaultState>, sc
                         notes: row.get(7)?,
                         created_at: row.get(8)?,
                         updated_at: row.get(9)?,
+                        sort_order: row.get(10)?,
                     },
                 ))
             })

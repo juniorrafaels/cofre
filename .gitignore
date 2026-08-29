@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Executável permanente gerado por "npm run release" (não deve ser versionado)
+/Cofre de Contas.exe
+/.Cofre de Contas.exe.tmp
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

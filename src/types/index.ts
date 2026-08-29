@@ -7,6 +7,7 @@ export interface Platform {
   is_custom: number;
   logo_image_id: number | null;
   created_at: string;
+  sort_order: number;
 }
 
 export interface Tag {
@@ -24,6 +25,7 @@ export interface Project {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  sort_order: number;
 }
 
 export interface ProjectWithRelations extends Project {

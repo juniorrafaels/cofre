@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Pencil, Plus, Trash2 } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { PlatformIcon } from "../ui/PlatformIcon";
 import { PlatformForm, type PlatformFormValues } from "./PlatformForm";
 import type { Platform } from "../../types";
-import { createPlatform, deletePlatform, reassignAccountsPlatform, updatePlatform } from "../../lib/db";
+import { createPlatform, deletePlatform, reassignAccountsPlatform, reorderPlatforms, updatePlatform } from "../../lib/db";
 import { useToastStore } from "../../store/useToastStore";
 
 interface Props {
@@ -101,6 +101,16 @@ export function PlatformManagerModal({ open, onClose, platforms, countsByPlatfor
     push("Plataforma excluída", "success");
   }
 
+  async function handleMove(platform: Platform, direction: -1 | 1) {
+    const index = platforms.findIndex((p) => p.id === platform.id);
+    const target = index + direction;
+    if (index === -1 || target < 0 || target >= platforms.length) return;
+    const reordered = [...platforms];
+    [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+    await reorderPlatforms(reordered.map((p) => p.id));
+    onChanged();
+  }
+
   return (
     <>
       <Modal open={open} onClose={onClose} title="Gerenciar plataformas" width="md">
@@ -116,7 +126,7 @@ export function PlatformManagerModal({ open, onClose, platforms, countsByPlatfor
           </Button>
         </div>
         <div className="max-h-96 space-y-1 overflow-y-auto">
-          {platforms.map((platform) => (
+          {platforms.map((platform, index) => (
             <div key={platform.id} className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-[var(--color-surface-hover)]">
               <PlatformIcon icon={platform.icon} logoImageId={platform.logo_image_id} size={17} />
               <div className="min-w-0 flex-1">
@@ -124,6 +134,25 @@ export function PlatformManagerModal({ open, onClose, platforms, countsByPlatfor
                 <p className="truncate text-xs text-[var(--color-text-muted)]">{countsByPlatform[platform.id] ?? 0} contas</p>
               </div>
               <button
+                type="button"
+                onClick={() => handleMove(platform, -1)}
+                disabled={index === 0}
+                className="rounded-md p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] disabled:opacity-30"
+                title="Mover para cima"
+              >
+                <ArrowUp size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={() => handleMove(platform, 1)}
+                disabled={index === platforms.length - 1}
+                className="rounded-md p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] disabled:opacity-30"
+                title="Mover para baixo"
+              >
+                <ArrowDown size={14} />
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setEditing(platform);
                   setFormOpen(true);
@@ -133,6 +162,7 @@ export function PlatformManagerModal({ open, onClose, platforms, countsByPlatfor
                 <Pencil size={14} />
               </button>
               <button
+                type="button"
                 onClick={() => setPendingDelete(platform)}
                 className="rounded-md p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-danger)]"
               >

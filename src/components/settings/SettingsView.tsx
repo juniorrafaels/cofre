@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Database, Layers, Lock, Monitor, Moon, Palette, Shield, Sun } from "lucide-react";
+import { Database, FolderKanban, Layers, Lock, Monitor, Moon, Palette, Shield, Sun } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Input, Label } from "../ui/Input";
 import { useSettingsStore } from "../../store/useSettingsStore";
@@ -12,8 +12,10 @@ import { RecoveryKeySection } from "./RecoveryKeySection";
 import { TagsManagerSection } from "./TagsManagerSection";
 import { ListColumnsConfig } from "./ListColumnsConfig";
 import { PlatformManagerModal } from "../platforms/PlatformManagerModal";
+import { ProjectManagerModal } from "../projects/ProjectManagerModal";
 import { PlatformIcon } from "../ui/PlatformIcon";
-import type { Platform } from "../../types";
+import { Avatar } from "../ui/Avatar";
+import type { Platform, ProjectWithRelations, Tag } from "../../types";
 import clsx from "clsx";
 
 const AUTO_LOCK_OPTIONS = [1, 5, 15, 30, 60];
@@ -22,6 +24,8 @@ interface Props {
   platforms: Platform[];
   countsByPlatform: Record<number, number>;
   onPlatformsChanged: () => void;
+  projects: ProjectWithRelations[];
+  tags: Tag[];
 }
 
 function SectionCard({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
@@ -47,7 +51,7 @@ function Row({ label, description, children }: { label: string; description?: st
   );
 }
 
-export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged }: Props) {
+export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, projects, tags }: Props) {
   const settings = useSettingsStore();
   const lock = useVaultStore((s) => s.lock);
   const push = useToastStore((s) => s.push);
@@ -58,6 +62,7 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged }
   const [changingPassword, setChangingPassword] = useState(false);
   const [backupPassword, setBackupPassword] = useState("");
   const [platformManagerOpen, setPlatformManagerOpen] = useState(false);
+  const [projectManagerOpen, setProjectManagerOpen] = useState(false);
 
   async function handleChangePassword(e: FormEvent) {
     e.preventDefault();
@@ -219,6 +224,27 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged }
         </Button>
       </SectionCard>
 
+      <SectionCard icon={<FolderKanban size={16} />} title="Projetos">
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Visualize os projetos existentes e defina a ordem em que eles aparecem no aplicativo.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {projects.slice(0, 8).map((p) => (
+            <span key={p.id} className="flex items-center gap-1.5 rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs">
+              <Avatar imageId={p.avatar_image_id} size={16} /> {p.name}
+            </span>
+          ))}
+          {projects.length > 8 && (
+            <span className="rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs text-[var(--color-text-muted)]">
+              +{projects.length - 8}
+            </span>
+          )}
+        </div>
+        <Button variant="secondary" onClick={() => setProjectManagerOpen(true)}>
+          Gerenciar projetos
+        </Button>
+      </SectionCard>
+
       <TagsManagerSection onChanged={onPlatformsChanged} />
 
       <PlatformManagerModal
@@ -226,6 +252,14 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged }
         onClose={() => setPlatformManagerOpen(false)}
         platforms={platforms}
         countsByPlatform={countsByPlatform}
+        onChanged={onPlatformsChanged}
+      />
+
+      <ProjectManagerModal
+        open={projectManagerOpen}
+        onClose={() => setProjectManagerOpen(false)}
+        projects={projects}
+        tags={tags}
         onChanged={onPlatformsChanged}
       />
 

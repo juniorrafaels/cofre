@@ -356,7 +356,13 @@ function App() {
 
         <div className="flex-1 overflow-y-auto">
           {view.type === "settings" && (
-            <SettingsView platforms={library.platforms} countsByPlatform={library.countsByPlatform} onPlatformsChanged={library.refresh} />
+            <SettingsView
+              platforms={library.platforms}
+              countsByPlatform={library.countsByPlatform}
+              onPlatformsChanged={library.refresh}
+              projects={library.projects}
+              tags={library.tags}
+            />
           )}
 
           {view.type === "projects" && (

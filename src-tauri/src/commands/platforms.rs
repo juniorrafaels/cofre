@@ -26,6 +26,7 @@ pub struct Platform {
     pub is_custom: i64,
     pub logo_image_id: Option<i64>,
     pub created_at: String,
+    pub sort_order: i64,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +48,7 @@ fn map_platform(row: &rusqlite::Row) -> rusqlite::Result<Platform> {
         is_custom: row.get(5)?,
         created_at: row.get(6)?,
         logo_image_id: row.get(7)?,
+        sort_order: row.get(8)?,
     })
 }
 
@@ -80,8 +82,8 @@ pub fn list_platforms(app: AppHandle, state: State<VaultState>) -> Result<Vec<Pl
     let conn = db::open(&app)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, icon, login_url, website_url, is_custom, created_at, logo_image_id \
-             FROM platforms ORDER BY is_custom ASC, name ASC",
+            "SELECT id, name, icon, login_url, website_url, is_custom, created_at, logo_image_id, sort_order \
+             FROM platforms ORDER BY sort_order ASC, is_custom ASC, name ASC",
         )
         .map_err(|e| e.to_string())?;
     let mapped = stmt.query_map([], map_platform).map_err(|e| e.to_string())?;
@@ -93,13 +95,32 @@ pub fn create_platform(app: AppHandle, state: State<VaultState>, input: Platform
     require_unlocked(&state)?;
     let v = validate_input(&input)?;
     let conn = db::open(&app)?;
+    let next_order: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM platforms", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO platforms (name, icon, login_url, website_url, logo_image_id, is_custom, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
-        params![v.name, v.icon, v.login_url, v.website_url, input.logo_image_id, db::now_iso()],
+        "INSERT INTO platforms (name, icon, login_url, website_url, logo_image_id, is_custom, created_at, sort_order) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+        params![v.name, v.icon, v.login_url, v.website_url, input.logo_image_id, db::now_iso(), next_order],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
+}
+
+#[tauri::command]
+pub fn reorder_platforms(app: AppHandle, state: State<VaultState>, ordered_ids: Vec<i64>) -> Result<(), String> {
+    require_unlocked(&state)?;
+    for id in &ordered_ids {
+        validate::positive_id(*id, "id")?;
+    }
+    let mut conn = db::open(&app)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (index, id) in ordered_ids.iter().enumerate() {
+        tx.execute("UPDATE platforms SET sort_order = ?1 WHERE id = ?2", params![index as i64, id])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

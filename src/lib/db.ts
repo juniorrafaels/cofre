@@ -57,6 +57,10 @@ export async function reassignAccountsPlatform(fromPlatformId: number, toPlatfor
   await invoke<void>("reassign_accounts_platform", { fromPlatformId, toPlatformId });
 }
 
+export async function reorderPlatforms(orderedIds: number[]): Promise<void> {
+  await invoke<void>("reorder_platforms", { orderedIds });
+}
+
 // ---------- Tags ----------
 
 export async function listTags(): Promise<Tag[]> {
@@ -226,6 +230,10 @@ export async function deleteProject(id: number): Promise<void> {
 
 export async function toggleProjectFavorite(id: number, favorite: boolean): Promise<void> {
   await invoke<void>("toggle_project_favorite", { id, favorite });
+}
+
+export async function reorderProjects(orderedIds: number[]): Promise<void> {
+  await invoke<void>("reorder_projects", { orderedIds });
 }
 
 // ---------- Custom properties ----------
