@@ -1,8 +1,9 @@
 import { Copy, ExternalLink, Key, Pencil, Star } from "lucide-react";
 import type { AccountWithRelations } from "../../types";
 import { Avatar } from "../ui/Avatar";
-import { useCopy } from "../../lib/useCopy";
-import { openLoginUrl, secretCommands } from "../../lib/tauri";
+import { StatusBadge } from "../ui/StatusBadge";
+import { useCopy, useCopySecret } from "../../lib/useCopy";
+import { accountSecretCommands, openLoginUrl } from "../../lib/tauri";
 import { useToastStore } from "../../store/useToastStore";
 
 interface Props {
@@ -14,6 +15,7 @@ interface Props {
 
 export function AccountCard({ account, onOpenDetail, onEdit, onToggleFavorite }: Props) {
   const copy = useCopy();
+  const copySecret = useCopySecret();
   const push = useToastStore((s) => s.push);
 
   const loginUrl = account.login_url || account.platform?.login_url || "";
@@ -33,16 +35,9 @@ export function AccountCard({ account, onOpenDetail, onEdit, onToggleFavorite }:
 
   async function handleCopyPassword(e: React.MouseEvent) {
     e.stopPropagation();
-    if (!account.encrypted_password) {
-      push("Nenhuma senha cadastrada.", "error");
-      return;
-    }
-    try {
-      const plaintext = await secretCommands.decrypt(account.encrypted_password);
-      await copy(plaintext, "Senha");
-    } catch (err) {
-      push(`Não foi possível copiar a senha: ${String(err)}`, "error");
-    }
+    // Decifra e copia inteiramente no backend — o plaintext da senha nunca passa pelo frontend
+    // aqui, já que a intenção deste botão é só copiar (o "revelar" fica no modal de detalhes).
+    await copySecret(account.has_password, (seconds) => accountSecretCommands.copyPassword(account.id, seconds), "Senha");
   }
 
   return (
@@ -52,9 +47,17 @@ export function AccountCard({ account, onOpenDetail, onEdit, onToggleFavorite }:
     >
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-2.5">
-          <Avatar imageId={account.avatar_image_id} platformIcon={account.platform?.icon ?? null} size={36} />
+          <Avatar
+            imageId={account.avatar_image_id}
+            platformIcon={account.platform?.icon ?? null}
+            platformLogoImageId={account.platform?.logo_image_id}
+            size={36}
+          />
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-[var(--color-text)]">{account.name}</p>
+            <div className="flex items-center gap-1.5">
+              <p className="truncate text-sm font-semibold text-[var(--color-text)]">{account.name}</p>
+              <StatusBadge status={account.status} />
+            </div>
             <p className="truncate text-xs text-[var(--color-text-muted)]">{account.username || account.email || "—"}</p>
           </div>
         </div>

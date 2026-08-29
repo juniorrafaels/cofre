@@ -6,11 +6,12 @@ import { PlatformIcon } from "./PlatformIcon";
 interface Props {
   imageId?: number | null;
   platformIcon?: string | null;
+  platformLogoImageId?: number | null;
   size?: number;
   className?: string;
 }
 
-export function Avatar({ imageId, platformIcon = null, size = 36, className }: Props) {
+export function Avatar({ imageId, platformIcon = null, platformLogoImageId = null, size = 36, className }: Props) {
   const [src, setSrc] = useState<string | null>(null);
 
   useEffect(() => {
@@ -37,7 +38,7 @@ export function Avatar({ imageId, platformIcon = null, size = 36, className }: P
       {src ? (
         <img src={src} alt="" className="h-full w-full object-cover" />
       ) : (
-        <PlatformIcon icon={platformIcon} size={Math.round(size * 0.5)} />
+        <PlatformIcon icon={platformIcon} logoImageId={platformLogoImageId} size={Math.round(size * 0.5)} />
       )}
     </div>
   );

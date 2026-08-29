@@ -1,3 +1,4 @@
+use crate::commands::vault::verify_current_password;
 use crate::crypto::{self, KdfParams};
 use crate::db;
 use crate::state::VaultState;
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sharks::{Share, Sharks};
 use std::convert::TryFrom;
 use tauri::{AppHandle, State};
+use zeroize::Zeroizing;
 
 pub const MAX_QUESTIONS: i64 = 20;
 pub const RECOVERY_THRESHOLD: u8 = 3;
@@ -36,8 +38,8 @@ fn share_for_index(dek: &[u8; 32], share_index: i64) -> Vec<u8> {
     Vec::from(&share)
 }
 
-fn normalize_answer(answer: &str) -> String {
-    answer.trim().to_lowercase()
+fn normalize_answer(answer: &str) -> Zeroizing<String> {
+    Zeroizing::new(answer.trim().to_lowercase())
 }
 
 fn wrap_share(share_bytes: &[u8], answer: &str) -> Result<(Vec<u8>, String, Vec<u8>), String> {
@@ -72,8 +74,19 @@ pub fn security_questions_summary(app: AppHandle) -> Result<SecurityQuestionsSum
     Ok(SecurityQuestionsSummary { count, max_allowed: MAX_QUESTIONS, min_required_for_recovery: RECOVERY_THRESHOLD })
 }
 
+/// Fase 4 (SECURITY_AUDIT_PHASE_4.md): adicionar/editar/remover pergunta de segurança agora
+/// exige a senha mestra atual, reverificada no próprio comando — essas ações alteram um dos dois
+/// mecanismos de recuperação do cofre, mesmo padrão de reautenticação aplicado à Recovery Key.
 #[tauri::command]
-pub fn add_security_question(app: AppHandle, state: State<VaultState>, question: String, answer: String) -> Result<(), String> {
+pub fn add_security_question(
+    app: AppHandle,
+    state: State<VaultState>,
+    current_password: String,
+    question: String,
+    answer: String,
+) -> Result<(), String> {
+    let current_password = Zeroizing::new(current_password);
+    let answer = Zeroizing::new(answer);
     let question = question.trim().to_string();
     if question.is_empty() {
         return Err("A pergunta não pode ficar vazia.".to_string());
@@ -83,6 +96,7 @@ pub fn add_security_question(app: AppHandle, state: State<VaultState>, question:
     }
 
     let conn = db::open(&app)?;
+    verify_current_password(&conn, &current_password)?;
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM security_questions", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
@@ -114,18 +128,21 @@ pub fn add_security_question(app: AppHandle, state: State<VaultState>, question:
 pub fn update_security_question(
     app: AppHandle,
     state: State<VaultState>,
+    current_password: String,
     id: i64,
     question: String,
     answer: Option<String>,
 ) -> Result<(), String> {
+    let current_password = Zeroizing::new(current_password);
     let question = question.trim().to_string();
     if question.is_empty() {
         return Err("A pergunta não pode ficar vazia.".to_string());
     }
 
     let conn = db::open(&app)?;
+    verify_current_password(&conn, &current_password)?;
 
-    match answer.filter(|a| !a.trim().is_empty()) {
+    match answer.filter(|a| !a.trim().is_empty()).map(Zeroizing::new) {
         Some(new_answer) => {
             let share_index: i64 = conn
                 .query_row("SELECT share_index FROM security_questions WHERE id = ?1", [id], |row| row.get(0))
@@ -154,13 +171,44 @@ pub fn update_security_question(
 }
 
 #[tauri::command]
-pub fn delete_security_question(app: AppHandle, state: State<VaultState>, id: i64) -> Result<(), String> {
+pub fn delete_security_question(app: AppHandle, state: State<VaultState>, current_password: String, id: i64) -> Result<(), String> {
+    let current_password = Zeroizing::new(current_password);
     if !state.is_unlocked() {
         return Err("O cofre está bloqueado.".to_string());
     }
     let conn = db::open(&app)?;
+    verify_current_password(&conn, &current_password)?;
     conn.execute("DELETE FROM security_questions WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[derive(Serialize)]
+pub struct SecurityQuestionListItem {
+    pub id: i64,
+    pub question: String,
+    pub share_index: i64,
+    pub created_at: String,
+}
+
+/// Diferente de `get_recovery_questions` (usado durante o fluxo de recuperação, com o cofre
+/// ainda BLOQUEADO, e que só mostra uma amostra de 5), este command lista TODAS as perguntas
+/// cadastradas para a tela de gerenciamento em Configurações — por isso exige o cofre
+/// desbloqueado. Nunca retorna `answer_salt`/`wrapped_share` (não há resposta nenhuma aqui).
+#[tauri::command]
+pub fn list_security_questions(app: AppHandle, state: State<VaultState>) -> Result<Vec<SecurityQuestionListItem>, String> {
+    if !state.is_unlocked() {
+        return Err("O cofre está bloqueado.".to_string());
+    }
+    let conn = db::open(&app)?;
+    let mut stmt = conn
+        .prepare("SELECT id, question, share_index, created_at FROM security_questions ORDER BY created_at ASC")
+        .map_err(|e| e.to_string())?;
+    let mapped = stmt
+        .query_map([], |row| {
+            Ok(SecurityQuestionListItem { id: row.get(0)?, question: row.get(1)?, share_index: row.get(2)?, created_at: row.get(3)? })
+        })
+        .map_err(|e| e.to_string())?;
+    mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -188,7 +236,7 @@ pub fn get_recovery_questions(app: AppHandle) -> Result<Vec<RecoveryQuestion>, S
 #[derive(Deserialize)]
 pub struct RecoveryAnswer {
     pub id: i64,
-    pub answer: String,
+    pub answer: Zeroizing<String>,
 }
 
 #[derive(Serialize)]
@@ -302,6 +350,11 @@ pub fn attempt_vault_recovery(
 
     conn.execute("UPDATE recovery_attempts SET failed_count = 0, locked_until = NULL WHERE id = 1", [])
         .map_err(|e| e.to_string())?;
+
+    // Auto-cura (Fase 2): a DEK também pode ser obtida por este caminho (sem nunca passar por
+    // `unlock_vault`), então a migração precisa rodar aqui também.
+    crate::migration::migrate_plaintext_account_fields(&conn, &dek)?;
+
     state.set_dek(dek);
 
     Ok(RecoveryOutcome { success: true, message: "Identidade confirmada.".to_string() })
@@ -309,6 +362,7 @@ pub fn attempt_vault_recovery(
 
 #[tauri::command]
 pub fn reset_master_password_after_recovery(app: AppHandle, state: State<VaultState>, new_password: String) -> Result<(), String> {
+    let new_password = Zeroizing::new(new_password);
     if new_password.len() < 8 {
         return Err("A nova senha mestra deve ter pelo menos 8 caracteres.".to_string());
     }

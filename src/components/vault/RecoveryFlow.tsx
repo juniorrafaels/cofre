@@ -3,7 +3,7 @@ import { KeyRound, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { Input, Label } from "../ui/Input";
-import { securityQuestionCommands } from "../../lib/tauri";
+import { securityQuestionCommands, recoveryKeyCommands } from "../../lib/tauri";
 import { useVaultStore } from "../../store/useVaultStore";
 import { useToastStore } from "../../store/useToastStore";
 import type { RecoveryQuestion } from "../../types";
@@ -13,16 +13,29 @@ interface Props {
   onClose: () => void;
 }
 
-type Step = "loading" | "unavailable" | "answering" | "submitting" | "reset-password" | "done";
+type Step =
+  | "loading"
+  | "unavailable"
+  | "choose-method"
+  | "recovery-key"
+  | "answering"
+  | "submitting"
+  | "reset-password"
+  | "done";
 
 export function RecoveryFlow({ open, onClose }: Props) {
   const [step, setStep] = useState<Step>("loading");
   const [unavailableReason, setUnavailableReason] = useState("");
+  const [questionsAvailable, setQuestionsAvailable] = useState(false);
+  const [recoveryKeyAvailable, setRecoveryKeyAvailable] = useState(false);
   const [questions, setQuestions] = useState<RecoveryQuestion[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentAnswer, setCurrentAnswer] = useState("");
   const [collected, setCollected] = useState<{ id: number; answer: string }[]>([]);
   const [failMessage, setFailMessage] = useState<string | null>(null);
+  const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
+  const [recoveryKeyError, setRecoveryKeyError] = useState<string | null>(null);
+  const [recoveryKeySubmitting, setRecoveryKeySubmitting] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [resetError, setResetError] = useState<string | null>(null);
@@ -30,36 +43,63 @@ export function RecoveryFlow({ open, onClose }: Props) {
   const refreshVault = useVaultStore((s) => s.refresh);
   const push = useToastStore((s) => s.push);
 
-  async function startFlow() {
-    setStep("loading");
-    setFailMessage(null);
-    const summary = await securityQuestionCommands.summary();
-    if (summary.count === 0) {
-      setUnavailableReason(
-        "Não existem perguntas de segurança cadastradas. Sem a senha mestra e sem um mecanismo de recuperação previamente configurado, os dados protegidos não podem ser recuperados.",
-      );
-      setStep("unavailable");
-      return;
-    }
-    if (summary.count < summary.min_required_for_recovery) {
-      setUnavailableReason(
-        `São necessárias pelo menos ${summary.min_required_for_recovery} perguntas de segurança cadastradas para habilitar a recuperação. Você tem ${summary.count}.`,
-      );
-      setStep("unavailable");
-      return;
-    }
+  async function startQuestionsFlow() {
     const list = await securityQuestionCommands.getRecoveryQuestions();
     setQuestions(list);
     setCurrentIndex(0);
     setCurrentAnswer("");
     setCollected([]);
+    setFailMessage(null);
     setStep("answering");
+  }
+
+  async function startFlow() {
+    setStep("loading");
+    setFailMessage(null);
+    const [summary, keyStatus] = await Promise.all([securityQuestionCommands.summary(), recoveryKeyCommands.status()]);
+    const hasQuestions = summary.count >= summary.min_required_for_recovery;
+    const hasRecoveryKey = keyStatus.enabled;
+    setQuestionsAvailable(hasQuestions);
+    setRecoveryKeyAvailable(hasRecoveryKey);
+
+    if (!hasQuestions && !hasRecoveryKey) {
+      setUnavailableReason(
+        summary.count > 0
+          ? `São necessárias pelo menos ${summary.min_required_for_recovery} perguntas de segurança cadastradas para habilitar a recuperação por perguntas. Você tem ${summary.count} e nenhuma Recovery Key configurada.`
+          : "Nenhum mecanismo de recuperação foi configurado (nem Recovery Key, nem perguntas de segurança). Sem a senha mestra, os dados protegidos não podem ser recuperados.",
+      );
+      setStep("unavailable");
+      return;
+    }
+
+    if (hasRecoveryKey && hasQuestions) {
+      setStep("choose-method");
+    } else if (hasRecoveryKey) {
+      setStep("recovery-key");
+    } else {
+      await startQuestionsFlow();
+    }
   }
 
   useEffect(() => {
     if (open) startFlow();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  async function handleRecoveryKeySubmit(e: FormEvent) {
+    e.preventDefault();
+    setRecoveryKeySubmitting(true);
+    setRecoveryKeyError(null);
+    try {
+      await recoveryKeyCommands.unlockWithKey(recoveryKeyInput);
+      setRecoveryKeyInput("");
+      setStep("reset-password");
+    } catch (err) {
+      setRecoveryKeyError(String(err));
+    } finally {
+      setRecoveryKeySubmitting(false);
+    }
+  }
 
   function handleNext(e: FormEvent) {
     e.preventDefault();
@@ -138,6 +178,55 @@ export function RecoveryFlow({ open, onClose }: Props) {
         </div>
       )}
 
+      {step === "choose-method" && (
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">Como você quer confirmar sua identidade?</p>
+          <div className="space-y-2">
+            <Button variant="primary" className="w-full justify-start" onClick={() => setStep("recovery-key")}>
+              <KeyRound size={14} /> Usar minha Recovery Key
+            </Button>
+            <Button variant="secondary" className="w-full justify-start" onClick={() => startQuestionsFlow()}>
+              <ShieldCheck size={14} /> Responder perguntas de segurança
+            </Button>
+          </div>
+          <div className="flex justify-end pt-2">
+            <Button variant="ghost" onClick={onClose}>
+              Cancelar
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {step === "recovery-key" && (
+        <form onSubmit={handleRecoveryKeySubmit} className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Digite a Recovery Key gerada quando você a configurou. Hífens e maiúsculas/minúsculas não importam.
+          </p>
+          {recoveryKeyError && <p className="text-sm text-[var(--color-danger)]">{recoveryKeyError}</p>}
+          <div>
+            <Label>Recovery Key</Label>
+            <Input
+              value={recoveryKeyInput}
+              onChange={(e) => setRecoveryKeyInput(e.target.value)}
+              autoFocus
+              className="font-mono"
+              placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"
+              disabled={recoveryKeySubmitting}
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            {questionsAvailable && (
+              <Button type="button" variant="ghost" onClick={() => startQuestionsFlow()}>
+                Usar perguntas em vez disso
+              </Button>
+            )}
+            <Button type="submit" variant="primary" disabled={!recoveryKeyInput.trim() || recoveryKeySubmitting}>
+              {recoveryKeySubmitting ? "Verificando..." : "Confirmar"}
+            </Button>
+          </div>
+        </form>
+      )}
+
       {(step === "answering" || step === "submitting") && questions.length > 0 && (
         <form onSubmit={handleNext} className="space-y-3">
           <p className="text-sm text-[var(--color-text-muted)]">
@@ -155,6 +244,11 @@ export function RecoveryFlow({ open, onClose }: Props) {
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancelar
             </Button>
+            {recoveryKeyAvailable && currentIndex === 0 && (
+              <Button type="button" variant="ghost" onClick={() => setStep("recovery-key")}>
+                Usar Recovery Key
+              </Button>
+            )}
             <Button type="submit" variant="primary" disabled={!currentAnswer.trim() || step === "submitting"}>
               {step === "submitting" ? "Verificando..." : currentIndex + 1 < questions.length ? "Próxima" : "Concluir"}
             </Button>

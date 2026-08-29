@@ -1,13 +1,15 @@
 import { create } from "zustand";
 import { getAllSettings, setSetting } from "../lib/db";
-import type { AppSettings, ThemePreference, ViewMode } from "../types";
+import { DEFAULT_LIST_COLUMNS, type AppSettings, type ListColumnKey, type ThemePreference, type ViewMode } from "../types";
 
 const DEFAULTS: AppSettings = {
   theme: "system",
   autoLockMinutes: 5,
+  lockOnMinimize: false,
   clipboardClearEnabled: true,
   clipboardClearSeconds: 20,
   viewMode: "grid",
+  listColumns: DEFAULT_LIST_COLUMNS,
 };
 
 interface SettingsStore extends AppSettings {
@@ -15,9 +17,11 @@ interface SettingsStore extends AppSettings {
   load: () => Promise<void>;
   setTheme: (theme: ThemePreference) => Promise<void>;
   setAutoLockMinutes: (minutes: number) => Promise<void>;
+  setLockOnMinimize: (enabled: boolean) => Promise<void>;
   setClipboardClearEnabled: (enabled: boolean) => Promise<void>;
   setClipboardClearSeconds: (seconds: number) => Promise<void>;
   setViewMode: (mode: ViewMode) => Promise<void>;
+  setListColumns: (columns: ListColumnKey[]) => Promise<void>;
 }
 
 function applyTheme(theme: ThemePreference) {
@@ -31,12 +35,23 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   loaded: false,
   load: async () => {
     const raw = await getAllSettings();
+    let listColumns = DEFAULTS.listColumns;
+    if (raw.list_columns) {
+      try {
+        const parsed = JSON.parse(raw.list_columns);
+        if (Array.isArray(parsed) && parsed.length > 0) listColumns = parsed;
+      } catch {
+        // ignora config corrompida, mantém o padrão
+      }
+    }
     const next: AppSettings = {
       theme: (raw.theme as ThemePreference) ?? DEFAULTS.theme,
       autoLockMinutes: raw.auto_lock_minutes ? Number(raw.auto_lock_minutes) : DEFAULTS.autoLockMinutes,
+      lockOnMinimize: raw.lock_on_minimize ? raw.lock_on_minimize === "true" : DEFAULTS.lockOnMinimize,
       clipboardClearEnabled: raw.clipboard_clear_enabled ? raw.clipboard_clear_enabled === "true" : DEFAULTS.clipboardClearEnabled,
       clipboardClearSeconds: raw.clipboard_clear_seconds ? Number(raw.clipboard_clear_seconds) : DEFAULTS.clipboardClearSeconds,
       viewMode: raw.view_mode === "list" ? "list" : DEFAULTS.viewMode,
+      listColumns,
     };
     applyTheme(next.theme);
     set({ ...next, loaded: true });
@@ -45,6 +60,10 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
     await setSetting("theme", theme);
     applyTheme(theme);
     set({ theme });
+  },
+  setLockOnMinimize: async (enabled) => {
+    await setSetting("lock_on_minimize", String(enabled));
+    set({ lockOnMinimize: enabled });
   },
   setAutoLockMinutes: async (minutes) => {
     await setSetting("auto_lock_minutes", String(minutes));
@@ -61,6 +80,10 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   setViewMode: async (mode) => {
     await setSetting("view_mode", mode);
     set({ viewMode: mode });
+  },
+  setListColumns: async (columns) => {
+    await setSetting("list_columns", JSON.stringify(columns));
+    set({ listColumns: columns });
   },
 }));
 

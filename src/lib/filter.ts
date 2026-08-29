@@ -3,14 +3,15 @@ import type { AccountWithRelations } from "../types";
 export function matchesSearch(account: AccountWithRelations, query: string): boolean {
   if (!query.trim()) return true;
   const q = query.trim().toLowerCase();
+  // account.notes é cifrado (Fase 2) — nunca entra no índice de busca em texto puro.
   const haystack = [
     account.name,
     account.username,
     account.email,
     account.category,
-    account.notes,
     account.platform?.name,
     ...account.tags.map((t) => t.name),
+    ...account.projects.map((p) => p.name),
   ]
     .filter(Boolean)
     .join(" ")

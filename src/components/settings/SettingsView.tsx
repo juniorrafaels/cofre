@@ -8,6 +8,9 @@ import { useVaultStore } from "../../store/useVaultStore";
 import { vaultCommands, backupCommands } from "../../lib/tauri";
 import { useToastStore } from "../../store/useToastStore";
 import { SecurityQuestionsSection } from "./SecurityQuestionsSection";
+import { RecoveryKeySection } from "./RecoveryKeySection";
+import { TagsManagerSection } from "./TagsManagerSection";
+import { ListColumnsConfig } from "./ListColumnsConfig";
 import { PlatformManagerModal } from "../platforms/PlatformManagerModal";
 import { PlatformIcon } from "../ui/PlatformIcon";
 import type { Platform } from "../../types";
@@ -138,6 +141,15 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged }
           </select>
         </Row>
 
+        <Row label="Bloquear ao minimizar" description="Bloqueia imediatamente quando a janela é minimizada ou perde visibilidade.">
+          <input
+            type="checkbox"
+            checked={settings.lockOnMinimize}
+            onChange={(e) => settings.setLockOnMinimize(e.target.checked)}
+            className="h-4 w-4"
+          />
+        </Row>
+
         <Row label="Limpar clipboard automaticamente" description="Apaga a área de transferência após copiar uma senha.">
           <input
             type="checkbox"
@@ -182,6 +194,7 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged }
           </Button>
         </form>
 
+        <RecoveryKeySection />
         <SecurityQuestionsSection />
       </SectionCard>
 
@@ -205,6 +218,8 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged }
           Gerenciar plataformas
         </Button>
       </SectionCard>
+
+      <TagsManagerSection onChanged={onPlatformsChanged} />
 
       <PlatformManagerModal
         open={platformManagerOpen}
@@ -236,6 +251,11 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged }
               {opt.icon} {opt.label}
             </button>
           ))}
+        </div>
+
+        <div className="border-t border-[var(--color-border)] pt-4">
+          <p className="mb-2 text-sm font-medium">Visualização em lista</p>
+          <ListColumnsConfig />
         </div>
       </SectionCard>
 

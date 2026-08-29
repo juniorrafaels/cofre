@@ -1,20 +1,63 @@
 import { Copy, ExternalLink, Key, Pencil, Star } from "lucide-react";
-import type { AccountWithRelations } from "../../types";
+import { LIST_COLUMN_LABELS, type AccountWithRelations, type ListColumnKey } from "../../types";
 import { Avatar } from "../ui/Avatar";
-import { useCopy } from "../../lib/useCopy";
-import { openLoginUrl, secretCommands } from "../../lib/tauri";
+import { StatusBadge } from "../ui/StatusBadge";
+import { useCopy, useCopySecret } from "../../lib/useCopy";
+import { accountSecretCommands, openLoginUrl } from "../../lib/tauri";
 import { useToastStore } from "../../store/useToastStore";
 
 interface Props {
   accounts: AccountWithRelations[];
+  columns: ListColumnKey[];
   onOpenDetail: (account: AccountWithRelations) => void;
   onEdit: (account: AccountWithRelations) => void;
   onToggleFavorite: (account: AccountWithRelations) => void;
 }
 
-export function AccountsListView({ accounts, onOpenDetail, onEdit, onToggleFavorite }: Props) {
+function ColumnCell({ column, account }: { column: ListColumnKey; account: AccountWithRelations }) {
+  switch (column) {
+    case "avatar":
+      return (
+        <Avatar
+          imageId={account.avatar_image_id}
+          platformIcon={account.platform?.icon ?? null}
+          platformLogoImageId={account.platform?.logo_image_id}
+          size={28}
+        />
+      );
+    case "name":
+      return (
+        <div className="flex items-center gap-1.5">
+          <span className="font-medium text-[var(--color-text)]">{account.name}</span>
+          {!!account.favorite && <Star size={12} fill="currentColor" className="text-amber-400" />}
+        </div>
+      );
+    case "platform":
+      return <span className="text-[var(--color-text-muted)]">{account.platform?.name ?? "—"}</span>;
+    case "username":
+      return <span className="text-[var(--color-text-muted)]">{account.username || "—"}</span>;
+    case "email":
+      return <span className="text-[var(--color-text-muted)]">{account.email || "—"}</span>;
+    case "project":
+      return <span className="text-[var(--color-text-muted)]">{account.projects.map((p) => p.name).join(", ") || "—"}</span>;
+    case "status":
+      return <StatusBadge status={account.status} />;
+    case "tags":
+      return <span className="text-[var(--color-text-muted)]">{account.tags.map((t) => t.name).join(", ") || "—"}</span>;
+    case "updated_at":
+      return <span className="text-[var(--color-text-muted)]">{new Date(account.updated_at).toLocaleDateString("pt-BR")}</span>;
+    case "two_factor":
+      return <span className="text-[var(--color-text-muted)]">{account.two_factor_enabled ? "Sim" : "Não"}</span>;
+    default:
+      return null;
+  }
+}
+
+export function AccountsListView({ accounts, columns, onOpenDetail, onEdit, onToggleFavorite }: Props) {
   const copy = useCopy();
+  const copySecret = useCopySecret();
   const push = useToastStore((s) => s.push);
+  const activeColumns = columns.length > 0 ? columns : (["avatar", "name"] as ListColumnKey[]);
 
   async function handleLogin(e: React.MouseEvent, account: AccountWithRelations) {
     e.stopPropagation();
@@ -28,27 +71,20 @@ export function AccountsListView({ accounts, onOpenDetail, onEdit, onToggleFavor
 
   async function handleCopyPassword(e: React.MouseEvent, account: AccountWithRelations) {
     e.stopPropagation();
-    if (!account.encrypted_password) {
-      push("Nenhuma senha cadastrada.", "error");
-      return;
-    }
-    try {
-      const plaintext = await secretCommands.decrypt(account.encrypted_password);
-      await copy(plaintext, "Senha");
-    } catch (err) {
-      push(`Não foi possível copiar a senha: ${String(err)}`, "error");
-    }
+    // Decifra e copia inteiramente no backend — o plaintext da senha nunca passa pelo frontend.
+    await copySecret(account.has_password, (seconds) => accountSecretCommands.copyPassword(account.id, seconds), "Senha");
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+    <div className="overflow-x-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-[var(--color-border)] text-left text-xs text-[var(--color-text-muted)]">
-            <th className="px-4 py-2.5 font-medium">Conta</th>
-            <th className="px-4 py-2.5 font-medium">Plataforma</th>
-            <th className="px-4 py-2.5 font-medium">Username</th>
-            <th className="px-4 py-2.5 font-medium">E-mail</th>
+            {activeColumns.map((col) => (
+              <th key={col} className="px-4 py-2.5 font-medium">
+                {col === "avatar" ? "" : LIST_COLUMN_LABELS[col]}
+              </th>
+            ))}
             <th className="px-4 py-2.5 font-medium text-right">Ações</th>
           </tr>
         </thead>
@@ -59,16 +95,11 @@ export function AccountsListView({ accounts, onOpenDetail, onEdit, onToggleFavor
               onClick={() => onOpenDetail(account)}
               className="cursor-pointer border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-surface-hover)]"
             >
-              <td className="px-4 py-2.5">
-                <div className="flex items-center gap-2.5">
-                  <Avatar imageId={account.avatar_image_id} platformIcon={account.platform?.icon ?? null} size={28} />
-                  <span className="font-medium text-[var(--color-text)]">{account.name}</span>
-                  {!!account.favorite && <Star size={12} fill="currentColor" className="text-amber-400" />}
-                </div>
-              </td>
-              <td className="px-4 py-2.5 text-[var(--color-text-muted)]">{account.platform?.name ?? "—"}</td>
-              <td className="px-4 py-2.5 text-[var(--color-text-muted)]">{account.username || "—"}</td>
-              <td className="px-4 py-2.5 text-[var(--color-text-muted)]">{account.email || "—"}</td>
+              {activeColumns.map((col) => (
+                <td key={col} className="px-4 py-2.5">
+                  <ColumnCell column={col} account={account} />
+                </td>
+              ))}
               <td className="px-4 py-2.5">
                 <div className="flex items-center justify-end gap-0.5">
                   <button onClick={(e) => handleLogin(e, account)} title="Abrir login" className="rounded-md p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]">

@@ -4,6 +4,7 @@ import { AccountCard } from "./AccountCard";
 import { AccountsListView } from "./AccountsListView";
 import { EmptyState } from "../ui/EmptyState";
 import { Button } from "../ui/Button";
+import { useSettingsStore } from "../../store/useSettingsStore";
 
 interface Props {
   accounts: AccountWithRelations[];
@@ -26,6 +27,8 @@ export function AccountsBoard({
   emptyDescription,
   onAddAccount,
 }: Props) {
+  const listColumns = useSettingsStore((s) => s.listColumns);
+
   if (accounts.length === 0) {
     return (
       <EmptyState
@@ -41,7 +44,9 @@ export function AccountsBoard({
   }
 
   if (viewMode === "list") {
-    return <AccountsListView accounts={accounts} onOpenDetail={onOpenDetail} onEdit={onEdit} onToggleFavorite={onToggleFavorite} />;
+    return (
+      <AccountsListView accounts={accounts} columns={listColumns} onOpenDetail={onOpenDetail} onEdit={onEdit} onToggleFavorite={onToggleFavorite} />
+    );
   }
 
   return (

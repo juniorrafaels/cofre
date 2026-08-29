@@ -3,7 +3,7 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { TopBar } from "./components/layout/TopBar";
 import { CategoryCard } from "./components/layout/CategoryCard";
 import { AccountsBoard } from "./components/accounts/AccountsBoard";
-import { AccountForm } from "./components/accounts/AccountForm";
+import { AccountForm, type SensitiveField } from "./components/accounts/AccountForm";
 import { AccountDetailModal } from "./components/accounts/AccountDetailModal";
 import { PlatformManagerModal } from "./components/platforms/PlatformManagerModal";
 import { PlatformForm, type PlatformFormValues } from "./components/platforms/PlatformForm";
@@ -12,15 +12,34 @@ import { CreateMasterPassword } from "./components/vault/CreateMasterPassword";
 import { UnlockScreen } from "./components/vault/UnlockScreen";
 import { ConfirmDialog } from "./components/ui/ConfirmDialog";
 import { ToastContainer } from "./components/ui/Toast";
+import { ProjectsBoard } from "./components/projects/ProjectsBoard";
+import { ProjectForm } from "./components/projects/ProjectForm";
+import { ProjectDetailView } from "./components/projects/ProjectDetailView";
+import { TrashView } from "./components/accounts/TrashView";
 import { useVaultStore } from "./store/useVaultStore";
 import { useSettingsStore } from "./store/useSettingsStore";
 import { useToastStore } from "./store/useToastStore";
 import { useLibrary } from "./lib/useLibrary";
 import { useAutoLock } from "./lib/useAutoLock";
 import { matchesSearch } from "./lib/filter";
-import { createAccount, createPlatform, deleteAccount, toggleFavorite, updateAccount } from "./lib/db";
-import { secretCommands } from "./lib/tauri";
-import type { AccountFormValues, AccountWithRelations, ViewState } from "./types";
+import {
+  archiveAccount,
+  createAccount,
+  createPlatform,
+  createProject,
+  deleteAccount,
+  deleteProject,
+  logHistory,
+  permanentlyDeleteAccount,
+  restoreAccount,
+  toggleFavorite,
+  toggleProjectFavorite,
+  unarchiveAccount,
+  updateAccount,
+  updateProject,
+  type SaveAccountInput,
+} from "./lib/db";
+import type { AccountFormValues, AccountWithRelations, ProjectFormValues, ProjectWithRelations, ViewState } from "./types";
 
 function App() {
   const vaultStatus = useVaultStore((s) => s.status);
@@ -41,6 +60,12 @@ function App() {
   const [platformManagerOpen, setPlatformManagerOpen] = useState(false);
   const [quickPlatformFormOpen, setQuickPlatformFormOpen] = useState(false);
   const [lastCreatedPlatformId, setLastCreatedPlatformId] = useState<number | null>(null);
+  const [projectFormOpen, setProjectFormOpen] = useState(false);
+  const [editingProject, setEditingProject] = useState<ProjectWithRelations | null>(null);
+  const [pendingDeleteProject, setPendingDeleteProject] = useState<ProjectWithRelations | null>(null);
+  const [quickProjectFormOpen, setQuickProjectFormOpen] = useState(false);
+  const [lastCreatedProjectId, setLastCreatedProjectId] = useState<number | null>(null);
+  const [projectSearch, setProjectSearch] = useState("");
 
   useEffect(() => {
     refreshVault();
@@ -56,6 +81,16 @@ function App() {
     push("Cofre bloqueado por inatividade.", "info");
   });
 
+  // Bloqueio opcional ao minimizar/perder visibilidade (Fase 2 — desligado por padrão).
+  useEffect(() => {
+    if (!unlocked || !settings.lockOnMinimize) return;
+    const handler = () => {
+      if (document.visibilityState === "hidden") lock();
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [unlocked, settings.lockOnMinimize, lock]);
+
   const filteredAccounts = useMemo(() => {
     let list = library.accounts;
     if (view.type === "platform") list = list.filter((a) => a.platform_id === view.platformId);
@@ -68,31 +103,59 @@ function App() {
     return search ? library.accounts.filter((a) => matchesSearch(a, search)) : library.accounts;
   }, [library.accounts, search]);
 
-  async function handleSaveAccount(values: AccountFormValues) {
-    let encryptedPassword: string | null = null;
-    if (values.password) {
-      encryptedPassword = await secretCommands.encrypt(values.password);
-    } else if (editingAccount) {
-      encryptedPassword = editingAccount.encrypted_password;
-    }
+  const filteredProjects = useMemo(() => {
+    if (!projectSearch.trim()) return library.projects;
+    const q = projectSearch.trim().toLowerCase();
+    return library.projects.filter(
+      (p) => p.name.toLowerCase().includes(q) || p.tags.some((t) => t.name.toLowerCase().includes(q)),
+    );
+  }, [library.projects, projectSearch]);
 
-    const payload = {
+  const currentProject = view.type === "project" ? library.projects.find((p) => p.id === view.projectId) ?? null : null;
+  const currentProjectAccounts = useMemo(() => {
+    if (!currentProject) return [];
+    return library.accounts.filter((a) => a.projects.some((p) => p.id === currentProject.id));
+  }, [library.accounts, currentProject]);
+
+  const filteredArchivedAccounts = useMemo(() => {
+    return search ? library.archivedAccounts.filter((a) => matchesSearch(a, search)) : library.archivedAccounts;
+  }, [library.archivedAccounts, search]);
+
+  // Fase 4 (SECURITY_AUDIT_PHASE_4.md): a WebView não cifra mais nada aqui — envia
+  // password/notes/2FA em texto puro, e é o Rust (`create_account`/`update_account`) quem cifra
+  // internamente antes de gravar. `preserveFields` continua existindo com a mesma semântica de
+  // antes (campo que falhou ao descriptografar e o usuário não editou), só que agora o Rust
+  // resolve isso mantendo o ciphertext antigo, sem nunca precisar decifrá-lo.
+  async function handleSaveAccount(values: AccountFormValues, preserveFields: SensitiveField[] = []) {
+    const passwordChanged = values.password.trim() !== "";
+
+    const payload: SaveAccountInput = {
       name: values.name.trim(),
       platform_id: values.platform_id,
       category: values.category.trim() || null,
       username: values.username.trim() || null,
       email: values.email.trim() || null,
-      encrypted_password: encryptedPassword,
+      password: passwordChanged ? values.password : null,
       login_url: values.login_url.trim() || null,
       website_url: values.website_url.trim() || null,
-      notes: values.notes.trim() || null,
+      notes: values.notes,
       favorite: values.favorite,
       avatar_image_id: values.avatar_image_id,
       tagNames: values.tags,
+      projectIds: values.projectIds,
+      status: values.status,
+      two_factor_enabled: values.two_factor_enabled,
+      two_factor_method: values.two_factor_enabled ? values.two_factor_method : null,
+      two_factor_phone: values.two_factor_phone,
+      two_factor_email: values.two_factor_email,
+      two_factor_app: values.two_factor_app,
+      two_factor_notes: values.two_factor_notes,
+      preserveFields,
     };
 
     if (values.id) {
       await updateAccount(values.id, payload);
+      await logAccountChanges(editingAccount, payload, passwordChanged);
       push("Conta atualizada.", "success");
     } else {
       await createAccount(payload);
@@ -101,13 +164,54 @@ function App() {
     await library.refresh();
   }
 
+  async function logAccountChanges(before: AccountWithRelations | null, after: SaveAccountInput, passwordChanged: boolean) {
+    if (!before) return;
+    const accountId = before.id;
+    if (before.username !== after.username) {
+      await logHistory(accountId, "username_changed", `${before.username ?? "—"} → ${after.username ?? "—"}`);
+    }
+    if (before.email !== after.email) {
+      await logHistory(accountId, "email_changed");
+    }
+    if (passwordChanged) {
+      await logHistory(accountId, "password_changed");
+    }
+    if (before.platform_id !== after.platform_id) {
+      await logHistory(accountId, "platform_changed");
+    }
+    if (before.status !== after.status) {
+      await logHistory(accountId, "status_changed", after.status);
+    }
+    if (before.avatar_image_id !== after.avatar_image_id) {
+      await logHistory(accountId, "avatar_changed");
+    }
+    const beforeTags = before.tags.map((t) => t.name).sort().join(",");
+    const afterTags = [...after.tagNames].sort().join(",");
+    if (beforeTags !== afterTags) {
+      await logHistory(accountId, "tags_changed");
+    }
+    const beforeProjects = new Set(before.projects.map((p) => p.id));
+    const afterProjects = new Set(after.projectIds);
+    for (const id of afterProjects) {
+      if (!beforeProjects.has(id)) await logHistory(accountId, "project_added");
+    }
+    for (const id of beforeProjects) {
+      if (!afterProjects.has(id)) await logHistory(accountId, "project_removed");
+    }
+    if (!before.two_factor_enabled && after.two_factor_enabled) {
+      await logHistory(accountId, "two_factor_enabled");
+    } else if (before.two_factor_enabled && !after.two_factor_enabled) {
+      await logHistory(accountId, "two_factor_disabled");
+    }
+  }
+
   async function handleDeleteAccount() {
     if (!pendingDelete) return;
     await deleteAccount(pendingDelete.id);
     setPendingDelete(null);
     setDetailAccount(null);
     await library.refresh();
-    push("Conta excluída.", "success");
+    push("Conta movida para a lixeira.", "success");
   }
 
   async function handleToggleFavorite(account: AccountWithRelations) {
@@ -115,10 +219,67 @@ function App() {
     await library.refresh();
   }
 
+  async function handleArchiveToggle(account: AccountWithRelations) {
+    if (account.status === "archived") {
+      await unarchiveAccount(account.id);
+      push("Conta desarquivada.", "success");
+    } else {
+      await archiveAccount(account.id);
+      push("Conta arquivada.", "success");
+    }
+    setDetailAccount(null);
+    await library.refresh();
+  }
+
+  async function handleRestoreFromTrash(account: AccountWithRelations) {
+    await restoreAccount(account.id);
+    await library.refresh();
+    push("Conta restaurada.", "success");
+  }
+
+  async function handlePermanentlyDelete(account: AccountWithRelations) {
+    await permanentlyDeleteAccount(account.id);
+    await library.refresh();
+    push("Conta excluída permanentemente.", "success");
+  }
+
   async function handleCreateQuickPlatform(values: PlatformFormValues) {
     const id = await createPlatform(values);
     await library.refresh();
     setLastCreatedPlatformId(id);
+  }
+
+  async function handleSaveProject(values: ProjectFormValues) {
+    if (values.id) {
+      await updateProject(values.id, values);
+      push("Projeto atualizado.", "success");
+    } else {
+      await createProject(values);
+      push("Projeto criado.", "success");
+    }
+    await library.refresh();
+  }
+
+  async function handleCreateQuickProject(values: ProjectFormValues) {
+    const id = await createProject(values);
+    await library.refresh();
+    setLastCreatedProjectId(id);
+  }
+
+  async function handleDeleteProject() {
+    if (!pendingDeleteProject) return;
+    await deleteProject(pendingDeleteProject.id);
+    setPendingDeleteProject(null);
+    if (view.type === "project" && view.projectId === pendingDeleteProject.id) {
+      setView({ type: "projects" });
+    }
+    await library.refresh();
+    push("Projeto excluído. As contas associadas não foram apagadas.", "success");
+  }
+
+  async function handleToggleProjectFavorite(project: ProjectWithRelations) {
+    await toggleProjectFavorite(project.id, !project.favorite);
+    await library.refresh();
   }
 
   if (vaultStatus === "loading") {
@@ -138,7 +299,15 @@ function App() {
         ? "Favoritos"
         : view.type === "settings"
           ? "Configurações"
-          : library.platforms.find((p) => p.id === view.platformId)?.name ?? "Plataforma";
+          : view.type === "projects"
+            ? "Projetos"
+            : view.type === "project"
+              ? currentProject?.name ?? "Projeto"
+              : view.type === "archived"
+                ? "Arquivadas"
+                : view.type === "trash"
+                  ? "Lixeira"
+                  : library.platforms.find((p) => p.id === view.platformId)?.name ?? "Plataforma";
 
   return (
     <div className="flex h-screen overflow-hidden bg-[var(--color-bg)] text-[var(--color-text)]">
@@ -148,11 +317,14 @@ function App() {
         platforms={library.platforms}
         countsByPlatform={library.countsByPlatform}
         favoritesCount={library.favoritesCount}
+        projectsCount={library.projects.length}
+        archivedCount={library.archivedAccounts.length}
+        trashCount={library.trashedAccounts.length}
         onLock={() => lock()}
       />
 
       <div className="flex flex-1 flex-col overflow-hidden">
-        {view.type !== "settings" && (
+        {view.type !== "settings" && view.type !== "project" && view.type !== "projects" && view.type !== "trash" && (
           <TopBar
             title={viewTitle}
             search={search}
@@ -166,9 +338,65 @@ function App() {
           />
         )}
 
+        {view.type === "projects" && (
+          <TopBar
+            title={viewTitle}
+            search={projectSearch}
+            onSearchChange={setProjectSearch}
+            searchPlaceholder="Pesquisar projeto..."
+            addLabel="Novo projeto"
+            onAddAccount={() => {
+              setEditingProject(null);
+              setProjectFormOpen(true);
+            }}
+            viewMode={settings.viewMode}
+            onViewModeChange={settings.setViewMode}
+          />
+        )}
+
         <div className="flex-1 overflow-y-auto">
           {view.type === "settings" && (
             <SettingsView platforms={library.platforms} countsByPlatform={library.countsByPlatform} onPlatformsChanged={library.refresh} />
+          )}
+
+          {view.type === "projects" && (
+            <div className="p-6">
+              <ProjectsBoard
+                projects={filteredProjects}
+                viewMode={settings.viewMode}
+                onOpen={(project) => setView({ type: "project", projectId: project.id })}
+                onToggleFavorite={handleToggleProjectFavorite}
+                onAddProject={() => {
+                  setEditingProject(null);
+                  setProjectFormOpen(true);
+                }}
+              />
+            </div>
+          )}
+
+          {view.type === "project" && currentProject && (
+            <ProjectDetailView
+              project={currentProject}
+              accounts={currentProjectAccounts}
+              viewMode={settings.viewMode}
+              onBack={() => setView({ type: "projects" })}
+              onEdit={() => {
+                setEditingProject(currentProject);
+                setProjectFormOpen(true);
+              }}
+              onToggleFavorite={() => handleToggleProjectFavorite(currentProject)}
+              onDelete={() => setPendingDeleteProject(currentProject)}
+              onOpenAccountDetail={setDetailAccount}
+              onEditAccount={(a) => {
+                setEditingAccount(a);
+                setFormOpen(true);
+              }}
+              onToggleAccountFavorite={handleToggleFavorite}
+              onAddAccount={() => {
+                setEditingAccount(null);
+                setFormOpen(true);
+              }}
+            />
           )}
 
           {view.type === "dashboard" && (
@@ -180,6 +408,7 @@ function App() {
                     <CategoryCard
                       key={platform.id}
                       icon={platform.icon}
+                      logoImageId={platform.logo_image_id}
                       name={platform.name}
                       count={library.countsByPlatform[platform.id] ?? 0}
                       onClick={() => setView({ type: "platform", platformId: platform.id })}
@@ -240,6 +469,31 @@ function App() {
               />
             </div>
           )}
+
+          {view.type === "archived" && (
+            <div className="p-6">
+              <AccountsBoard
+                accounts={filteredArchivedAccounts}
+                viewMode={settings.viewMode}
+                onOpenDetail={setDetailAccount}
+                onEdit={(a) => {
+                  setEditingAccount(a);
+                  setFormOpen(true);
+                }}
+                onToggleFavorite={handleToggleFavorite}
+                emptyTitle="Nenhuma conta arquivada"
+                emptyDescription="Contas arquivadas ficam guardadas aqui, fora das listas principais."
+                onAddAccount={() => {
+                  setEditingAccount(null);
+                  setFormOpen(true);
+                }}
+              />
+            </div>
+          )}
+
+          {view.type === "trash" && (
+            <TrashView accounts={library.trashedAccounts} onRestore={handleRestoreFromTrash} onPermanentlyDelete={handlePermanentlyDelete} />
+          )}
         </div>
       </div>
 
@@ -248,11 +502,16 @@ function App() {
         onClose={() => setFormOpen(false)}
         onSubmit={handleSaveAccount}
         platforms={library.platforms}
+        projects={library.projects}
+        tags={library.tags}
         editingAccount={editingAccount}
         defaultPlatformId={view.type === "platform" ? view.platformId : null}
         onRequestNewPlatform={() => setQuickPlatformFormOpen(true)}
         newlyCreatedPlatformId={lastCreatedPlatformId}
         onNewPlatformConsumed={() => setLastCreatedPlatformId(null)}
+        onRequestNewProject={() => setQuickProjectFormOpen(true)}
+        newlyCreatedProjectId={lastCreatedProjectId}
+        onNewProjectConsumed={() => setLastCreatedProjectId(null)}
       />
 
       <AccountDetailModal
@@ -264,13 +523,14 @@ function App() {
           setFormOpen(true);
         }}
         onDelete={() => setPendingDelete(detailAccount)}
+        onArchiveToggle={() => detailAccount && handleArchiveToggle(detailAccount)}
       />
 
       <ConfirmDialog
         open={!!pendingDelete}
         title="Excluir conta"
-        message={`Tem certeza que deseja excluir "${pendingDelete?.name}"? Essa ação não pode ser desfeita.`}
-        confirmLabel="Excluir"
+        message={`"${pendingDelete?.name}" será movida para a lixeira. Você pode restaurá-la ou excluí-la permanentemente depois.`}
+        confirmLabel="Mover para a lixeira"
         danger
         onConfirm={handleDeleteAccount}
         onCancel={() => setPendingDelete(null)}
@@ -289,6 +549,32 @@ function App() {
         onClose={() => setQuickPlatformFormOpen(false)}
         onSubmit={handleCreateQuickPlatform}
         editingPlatform={null}
+      />
+
+      <ProjectForm
+        open={projectFormOpen}
+        onClose={() => setProjectFormOpen(false)}
+        onSubmit={handleSaveProject}
+        editingProject={editingProject}
+        tags={library.tags}
+      />
+
+      <ProjectForm
+        open={quickProjectFormOpen}
+        onClose={() => setQuickProjectFormOpen(false)}
+        onSubmit={handleCreateQuickProject}
+        editingProject={null}
+        tags={library.tags}
+      />
+
+      <ConfirmDialog
+        open={!!pendingDeleteProject}
+        title="Excluir projeto"
+        message={`Tem certeza que deseja excluir "${pendingDeleteProject?.name}"? As contas associadas não serão excluídas, apenas desvinculadas.`}
+        confirmLabel="Excluir"
+        danger
+        onConfirm={handleDeleteProject}
+        onCancel={() => setPendingDeleteProject(null)}
       />
 
       <ToastContainer />

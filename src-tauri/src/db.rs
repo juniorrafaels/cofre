@@ -94,8 +94,58 @@ CREATE TABLE IF NOT EXISTS recovery_attempts (
   locked_until TEXT
 );
 
+CREATE TABLE IF NOT EXISTS projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT,
+  color TEXT,
+  avatar_image_id INTEGER REFERENCES images(id) ON DELETE SET NULL,
+  favorite INTEGER NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_projects (
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  PRIMARY KEY (account_id, project_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_tags (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (project_id, tag_id)
+);
+
+CREATE TABLE IF NOT EXISTS custom_property_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_properties (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  definition_id INTEGER NOT NULL REFERENCES custom_property_definitions(id) ON DELETE CASCADE,
+  value TEXT,
+  is_sensitive INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  event TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform_id);
 CREATE INDEX IF NOT EXISTS idx_accounts_favorite ON accounts(favorite);
+CREATE INDEX IF NOT EXISTS idx_account_history_account ON account_history(account_id);
 "#;
 
 const DEFAULT_PLATFORMS: &[(&str, &str, &str, &str)] = &[
@@ -112,12 +162,34 @@ const DEFAULT_PLATFORMS: &[(&str, &str, &str, &str)] = &[
 ];
 
 pub fn init_schema(conn: &Connection) -> Result<(), String> {
-    // WAL permite que a conexão do Rust (comandos do cofre) e a do frontend
-    // (tauri-plugin-sql) acessem o mesmo arquivo concorrentemente sem "database is locked".
+    // WAL permite que múltiplas chamadas de commands concorrentes (cada uma abre sua própria
+    // `Connection` via `db::open`) acessem o mesmo arquivo sem "database is locked". Antes da
+    // Fase 3 isso também precisava coexistir com a conexão própria do `tauri-plugin-sql` usada
+    // pela WebView; esse plugin foi removido (ver SECURITY_AUDIT_PHASE_3.md — toda a superfície
+    // de SQL da WebView foi substituída por commands Rust dedicados), mas o WAL continua
+    // necessário pela concorrência entre commands do próprio backend.
     conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| e.to_string())?;
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     migrate_add_column(conn, "accounts", "avatar_image_id", "INTEGER REFERENCES images(id) ON DELETE SET NULL")?;
     migrate_add_column(conn, "vault_meta", "dek_check", "BLOB")?;
+    migrate_add_column(conn, "accounts", "status", "TEXT NOT NULL DEFAULT 'active'")?;
+    migrate_add_column(conn, "accounts", "deleted_at", "TEXT")?;
+    migrate_add_column(conn, "accounts", "two_factor_enabled", "INTEGER NOT NULL DEFAULT 0")?;
+    migrate_add_column(conn, "accounts", "two_factor_method", "TEXT")?;
+    migrate_add_column(conn, "accounts", "two_factor_phone", "TEXT")?;
+    migrate_add_column(conn, "accounts", "two_factor_email", "TEXT")?;
+    migrate_add_column(conn, "accounts", "two_factor_app", "TEXT")?;
+    migrate_add_column(conn, "accounts", "two_factor_notes", "TEXT")?;
+    migrate_add_column(conn, "images", "name", "TEXT")?;
+    migrate_add_column(conn, "platforms", "logo_image_id", "INTEGER REFERENCES images(id) ON DELETE SET NULL")?;
+    // Recovery Key (Fase 2): caminho de recuperação independente e de alta entropia, que
+    // desembrulha a MESMA DEK sob uma KEK derivada da própria chave via Argon2id — reaproveita
+    // exatamente os primitivos já usados pela senha mestra (ver SECURITY_AUDIT_PHASE_2.md).
+    migrate_add_column(conn, "vault_meta", "recovery_key_salt", "BLOB")?;
+    migrate_add_column(conn, "vault_meta", "recovery_key_kdf_params", "TEXT")?;
+    migrate_add_column(conn, "vault_meta", "recovery_key_wrapped_dek", "BLOB")?;
+    migrate_add_column(conn, "vault_meta", "recovery_key_check", "BLOB")?;
+    migrate_add_column(conn, "vault_meta", "recovery_key_created_at", "TEXT")?;
 
     let recovery_row_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM recovery_attempts WHERE id = 1", [], |row| row.get(0))

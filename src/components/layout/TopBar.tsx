@@ -9,9 +9,20 @@ interface Props {
   onAddAccount: () => void;
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
+  searchPlaceholder?: string;
+  addLabel?: string;
 }
 
-export function TopBar({ title, search, onSearchChange, onAddAccount, viewMode, onViewModeChange }: Props) {
+export function TopBar({
+  title,
+  search,
+  onSearchChange,
+  onAddAccount,
+  viewMode,
+  onViewModeChange,
+  searchPlaceholder = "Pesquisar conta...",
+  addLabel = "Adicionar conta",
+}: Props) {
   return (
     <div className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--color-border)] px-6 py-4">
       <h1 className="text-lg font-semibold text-[var(--color-text)]">{title}</h1>
@@ -21,7 +32,7 @@ export function TopBar({ title, search, onSearchChange, onAddAccount, viewMode, 
           <input
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Pesquisar conta..."
+            placeholder={searchPlaceholder}
             className="w-64 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-2 pl-9 pr-3 text-sm outline-none transition-shadow focus:ring-2 focus:ring-[var(--color-accent)]/40 focus:border-[var(--color-accent)]"
           />
         </div>
@@ -42,7 +53,7 @@ export function TopBar({ title, search, onSearchChange, onAddAccount, viewMode, 
           </button>
         </div>
         <Button variant="primary" onClick={onAddAccount}>
-          <Plus size={16} /> Adicionar conta
+          <Plus size={16} /> {addLabel}
         </Button>
       </div>
     </div>

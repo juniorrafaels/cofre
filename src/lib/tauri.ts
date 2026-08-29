@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl as openUrlPlugin } from "@tauri-apps/plugin-opener";
 import type { RecoveryOutcome, RecoveryQuestion, SecurityQuestionsSummary } from "../types";
 
+const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
+
 export interface VaultStatus {
   initialized: boolean;
   unlocked: boolean;
@@ -16,14 +18,37 @@ export const vaultCommands = {
     invoke<void>("change_master_password", { currentPassword, newPassword }),
 };
 
-export const secretCommands = {
-  encrypt: (plaintext: string) => invoke<string>("encrypt_secret", { plaintext }),
-  decrypt: (ciphertext: string) => invoke<string>("decrypt_secret", { ciphertext }),
-};
-
+// Fase 4 (SECURITY_AUDIT_PHASE_4.md): não existe mais `encrypt_secret`/`decrypt_secret` — nenhum
+// command aceita ciphertext arbitrário da WebView. Cada segredo tem sua própria operação
+// específica por ID (a Rust busca o ciphertext ela mesma no SQLite antes de cifrar/decifrar).
 export const clipboardCommands = {
   copy: (text: string, clearAfterSeconds?: number) =>
     invoke<void>("copy_to_clipboard", { text, clearAfterSeconds: clearAfterSeconds ?? null }),
+};
+
+export interface TwoFactorDetails {
+  phone: string;
+  email: string;
+  app: string;
+  notes: string;
+}
+
+// Senha e observações de uma conta: revelar/copiar/ler sempre por `id`, nunca por ciphertext.
+export const accountSecretCommands = {
+  revealPassword: (id: number) => invoke<string>("reveal_account_password", { id }),
+  copyPassword: (id: number, clearAfterSeconds?: number) =>
+    invoke<void>("copy_account_password", { id, clearAfterSeconds: clearAfterSeconds ?? null }),
+  getNotes: (id: number) => invoke<string>("get_account_notes", { id }),
+  getTwoFactorDetails: (id: number) => invoke<TwoFactorDetails>("get_account_two_factor_details", { id }),
+};
+
+// Propriedades sensíveis: revelar/copiar sempre por (accountId, propertyId) — o Rust confirma
+// posse (a propriedade pertence a essa conta) antes de decifrar qualquer coisa.
+export const propertySecretCommands = {
+  reveal: (accountId: number, propertyId: number) =>
+    invoke<string>("reveal_sensitive_property", { accountId, propertyId }),
+  copy: (accountId: number, propertyId: number, clearAfterSeconds?: number) =>
+    invoke<void>("copy_sensitive_property", { accountId, propertyId, clearAfterSeconds: clearAfterSeconds ?? null }),
 };
 
 export const backupCommands = {
@@ -33,20 +58,56 @@ export const backupCommands = {
     invoke<void>("import_backup", { inPath, backupPassword }),
 };
 
+// Defesa em profundidade (Fase 2): a capability `opener:allow-open-url` do Tauri já restringe
+// o plugin a esquemas http(s) via ACL nativo, mas validamos aqui também para: (1) dar um erro
+// claro em vez de uma rejeição silenciosa do plugin, e (2) não depender só da configuração do
+// backend caso ela mude no futuro. Bloqueia especificamente `javascript:`, `data:`, `file:` e
+// qualquer outro esquema que não seja http/https.
+export function isAllowedExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return ALLOWED_URL_SCHEMES.has(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
 export async function openLoginUrl(url: string) {
   if (!url) return;
+  if (!isAllowedExternalUrl(url)) {
+    throw new Error("URL inválida ou com esquema não permitido.");
+  }
   await openUrlPlugin(url);
 }
 
+// Fase 4: adicionar/editar/remover pergunta de segurança agora exige a senha mestra atual,
+// reverificada no próprio comando Rust (não um flag do frontend) — essas ações alteram um dos
+// mecanismos de recuperação do cofre.
 export const securityQuestionCommands = {
   summary: () => invoke<SecurityQuestionsSummary>("security_questions_summary"),
-  add: (question: string, answer: string) => invoke<void>("add_security_question", { question, answer }),
-  update: (id: number, question: string, answer?: string) =>
-    invoke<void>("update_security_question", { id, question, answer: answer || null }),
-  remove: (id: number) => invoke<void>("delete_security_question", { id }),
+  add: (currentPassword: string, question: string, answer: string) =>
+    invoke<void>("add_security_question", { currentPassword, question, answer }),
+  update: (currentPassword: string, id: number, question: string, answer?: string) =>
+    invoke<void>("update_security_question", { currentPassword, id, question, answer: answer || null }),
+  remove: (currentPassword: string, id: number) => invoke<void>("delete_security_question", { currentPassword, id }),
   getRecoveryQuestions: () => invoke<RecoveryQuestion[]>("get_recovery_questions"),
   attemptRecovery: (answers: { id: number; answer: string }[]) =>
     invoke<RecoveryOutcome>("attempt_vault_recovery", { answers }),
   resetPasswordAfterRecovery: (newPassword: string) =>
     invoke<void>("reset_master_password_after_recovery", { newPassword }),
+};
+
+export interface RecoveryKeyStatus {
+  enabled: boolean;
+  created_at: string | null;
+}
+
+// Fase 4: gerar/desativar a Recovery Key também exige a senha mestra atual, reverificada no Rust.
+export const recoveryKeyCommands = {
+  status: () => invoke<RecoveryKeyStatus>("recovery_key_status"),
+  // Retorna a chave em texto puro UMA VEZ — o chamador deve exibi-la, deixar o usuário copiar/
+  // imprimir, e nunca persisti-la (nem em localStorage) além do tempo de exibição.
+  generate: (currentPassword: string) => invoke<string>("generate_recovery_key", { currentPassword }),
+  disable: (currentPassword: string) => invoke<void>("disable_recovery_key", { currentPassword }),
+  unlockWithKey: (recoveryKey: string) => invoke<void>("unlock_with_recovery_key", { recoveryKey }),
 };

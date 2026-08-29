@@ -1,4 +1,4 @@
-import { LayoutGrid, Lock, Settings, ShieldCheck, Star } from "lucide-react";
+import { Archive, FolderKanban, LayoutGrid, Lock, Settings, ShieldCheck, Star, Trash2 } from "lucide-react";
 import clsx from "clsx";
 import type { Platform, ViewState } from "../../types";
 import { PlatformIcon } from "../ui/PlatformIcon";
@@ -9,6 +9,9 @@ interface Props {
   platforms: Platform[];
   countsByPlatform: Record<number, number>;
   favoritesCount: number;
+  projectsCount: number;
+  archivedCount: number;
+  trashCount: number;
   onLock: () => void;
 }
 
@@ -46,7 +49,17 @@ function NavItem({
   );
 }
 
-export function Sidebar({ view, onNavigate, platforms, countsByPlatform, favoritesCount, onLock }: Props) {
+export function Sidebar({
+  view,
+  onNavigate,
+  platforms,
+  countsByPlatform,
+  favoritesCount,
+  projectsCount,
+  archivedCount,
+  trashCount,
+  onLock,
+}: Props) {
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)] p-3">
       <div className="mb-4 flex items-center gap-2 px-2 pt-1.5">
@@ -70,6 +83,13 @@ export function Sidebar({ view, onNavigate, platforms, countsByPlatform, favorit
           count={favoritesCount}
           onClick={() => onNavigate({ type: "favorites" })}
         />
+        <NavItem
+          active={view.type === "projects" || view.type === "project"}
+          icon={<FolderKanban size={16} />}
+          label="Projetos"
+          count={projectsCount}
+          onClick={() => onNavigate({ type: "projects" })}
+        />
       </nav>
 
       <div className="mt-5 px-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-muted)]">
@@ -80,7 +100,7 @@ export function Sidebar({ view, onNavigate, platforms, countsByPlatform, favorit
           <NavItem
             key={platform.id}
             active={view.type === "platform" && view.platformId === platform.id}
-            icon={<PlatformIcon icon={platform.icon} size={16} />}
+            icon={<PlatformIcon icon={platform.icon} logoImageId={platform.logo_image_id} size={16} />}
             label={platform.name}
             count={countsByPlatform[platform.id] ?? 0}
             onClick={() => onNavigate({ type: "platform", platformId: platform.id })}
@@ -89,6 +109,20 @@ export function Sidebar({ view, onNavigate, platforms, countsByPlatform, favorit
       </nav>
 
       <div className="mt-3 flex flex-col gap-0.5 border-t border-[var(--color-border)] pt-3">
+        <NavItem
+          active={view.type === "archived"}
+          icon={<Archive size={16} />}
+          label="Arquivadas"
+          count={archivedCount}
+          onClick={() => onNavigate({ type: "archived" })}
+        />
+        <NavItem
+          active={view.type === "trash"}
+          icon={<Trash2 size={16} />}
+          label="Lixeira"
+          count={trashCount}
+          onClick={() => onNavigate({ type: "trash" })}
+        />
         <NavItem
           active={view.type === "settings"}
           icon={<Settings size={16} />}

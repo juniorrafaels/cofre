@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import { HelpCircle, Pencil, Plus, Printer, Trash2 } from "lucide-react";
 import { Button } from "../ui/Button";
-import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { Modal } from "../ui/Modal";
+import { Input, Label } from "../ui/Input";
 import { SecurityQuestionForm } from "./SecurityQuestionForm";
-import { ExportQuestionsDialog } from "./ExportQuestionsDialog";
+import { RecoveryKitDialog } from "./RecoveryKitDialog";
 import { listSecurityQuestions } from "../../lib/db";
 import { securityQuestionCommands } from "../../lib/tauri";
 import { useToastStore } from "../../store/useToastStore";
@@ -17,6 +18,9 @@ export function SecurityQuestionsSection() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<SecurityQuestion | null>(null);
   const [pendingDelete, setPendingDelete] = useState<SecurityQuestion | null>(null);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const push = useToastStore((s) => s.push);
 
@@ -30,27 +34,44 @@ export function SecurityQuestionsSection() {
     refresh();
   }, [refresh]);
 
-  async function handleSubmit(question: string, answer?: string) {
+  async function handleSubmit(currentPassword: string, question: string, answer?: string) {
     if (editing) {
-      await securityQuestionCommands.update(editing.id, question, answer);
+      await securityQuestionCommands.update(currentPassword, editing.id, question, answer);
       push("Pergunta atualizada.", "success");
     } else {
       if (questions.length >= MAX_QUESTIONS) {
         push(`Você atingiu o limite de ${MAX_QUESTIONS} perguntas de segurança.`, "error");
         return;
       }
-      await securityQuestionCommands.add(question, answer ?? "");
+      await securityQuestionCommands.add(currentPassword, question, answer ?? "");
       push("Pergunta adicionada.", "success");
     }
     await refresh();
   }
 
-  async function handleDelete() {
-    if (!pendingDelete) return;
-    await securityQuestionCommands.remove(pendingDelete.id);
+  function closeDeleteDialog() {
     setPendingDelete(null);
-    await refresh();
-    push("Pergunta removida.", "success");
+    setDeletePassword("");
+    setDeleteError(null);
+  }
+
+  // Fase 4 (SECURITY_AUDIT_PHASE_4.md): remover uma pergunta também exige a senha mestra atual —
+  // destrói parte do mecanismo de recuperação, mesmo padrão de reautenticação da Recovery Key.
+  async function handleDelete(e: FormEvent) {
+    e.preventDefault();
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await securityQuestionCommands.remove(deletePassword, pendingDelete.id);
+      closeDeleteDialog();
+      await refresh();
+      push("Pergunta removida.", "success");
+    } catch (err) {
+      setDeleteError(String(err));
+    } finally {
+      setDeleting(false);
+    }
   }
 
   const limitReached = questions.length >= MAX_QUESTIONS;
@@ -62,7 +83,8 @@ export function SecurityQuestionsSection() {
       </div>
       <p className="text-xs text-[var(--color-text-muted)]">
         Usadas para recuperar o acesso ao cofre caso você esqueça a senha mestra. As respostas nunca são salvas em texto
-        puro.
+        puro. Este método é mais fraco que a Recovery Key (abaixo) — a segurança dele depende inteiramente de você
+        escolher respostas difíceis de adivinhar.
       </p>
 
       {!loading && (
@@ -118,17 +140,35 @@ export function SecurityQuestionsSection() {
 
       <SecurityQuestionForm open={formOpen} onClose={() => setFormOpen(false)} onSubmit={handleSubmit} editingQuestion={editing} />
 
-      <ConfirmDialog
-        open={!!pendingDelete}
-        title="Remover pergunta"
-        message={`Tem certeza que deseja remover "${pendingDelete?.question}"? Isso pode reduzir suas opções de recuperação.`}
-        confirmLabel="Remover"
-        danger
-        onConfirm={handleDelete}
-        onCancel={() => setPendingDelete(null)}
-      />
+      <Modal open={!!pendingDelete} onClose={closeDeleteDialog} title="Remover pergunta" width="sm">
+        <form onSubmit={handleDelete} className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Tem certeza que deseja remover &quot;{pendingDelete?.question}&quot;? Isso pode reduzir suas opções de
+            recuperação.
+          </p>
+          <div>
+            <Label>Sua senha mestra</Label>
+            <Input
+              type="password"
+              value={deletePassword}
+              onChange={(e) => setDeletePassword(e.target.value)}
+              autoFocus
+              disabled={deleting}
+            />
+          </div>
+          {deleteError && <p className="text-sm text-[var(--color-danger)]">{deleteError}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="ghost" onClick={closeDeleteDialog} disabled={deleting}>
+              Cancelar
+            </Button>
+            <Button type="submit" variant="danger" disabled={!deletePassword || deleting}>
+              {deleting ? "Removendo..." : "Remover"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
-      <ExportQuestionsDialog open={exportOpen} onClose={() => setExportOpen(false)} />
+      <RecoveryKitDialog open={exportOpen} onClose={() => setExportOpen(false)} />
     </div>
   );
 }

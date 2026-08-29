@@ -118,7 +118,7 @@ export function PlatformManagerModal({ open, onClose, platforms, countsByPlatfor
         <div className="max-h-96 space-y-1 overflow-y-auto">
           {platforms.map((platform) => (
             <div key={platform.id} className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-[var(--color-surface-hover)]">
-              <PlatformIcon icon={platform.icon} size={17} />
+              <PlatformIcon icon={platform.icon} logoImageId={platform.logo_image_id} size={17} />
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{platform.name}</p>
                 <p className="truncate text-xs text-[var(--color-text-muted)]">{countsByPlatform[platform.id] ?? 0} contas</p>

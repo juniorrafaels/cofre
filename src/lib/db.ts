@@ -1,309 +1,278 @@
-import Database from "@tauri-apps/plugin-sql";
-import type { Account, AccountWithRelations, ImageRecord, Platform, SecurityQuestion, Tag } from "../types";
-
-let dbPromise: Promise<Database> | null = null;
-
-export function getDb(): Promise<Database> {
-  if (!dbPromise) {
-    dbPromise = Database.load("sqlite:vault.db");
-  }
-  return dbPromise;
-}
-
-function nowIso() {
-  return new Date().toISOString();
-}
+// Camada de acesso a dados do frontend.
+//
+// Fase 3 do hardening (ver SECURITY_AUDIT_PHASE_3.md): até a Fase 2, este arquivo falava SQL
+// diretamente com o `vault.db` via `tauri-plugin-sql` (acesso irrestrito: SELECT/INSERT/UPDATE/
+// DELETE livres a partir da WebView). Agora cada função aqui só invoca um Tauri command
+// específico — a WebView não consegue mais montar uma query arbitrária, e toda validação de
+// entrada, verificação de estado do cofre (bloqueado/desbloqueado) e parametrização de SQL
+// acontece inteiramente no processo Rust (`src-tauri/src/commands/*.rs`).
+//
+// As assinaturas exportadas abaixo são propositalmente idênticas às da versão anterior (mesmo
+// nome, mesmos parâmetros, mesmo tipo de retorno) para que nenhum componente precisasse mudar —
+// só a implementação interna trocou de "SQL cru" para "invoke de command".
+import { invoke } from "@tauri-apps/api/core";
+import type {
+  AccountHistoryEntry,
+  AccountPropertyWithDefinition,
+  AccountStatus,
+  AccountWithRelations,
+  ImageRecord,
+  Platform,
+  ProjectFormValues,
+  ProjectWithRelations,
+  PropertyDefinition,
+  PropertyType,
+  SecurityQuestion,
+  Tag,
+  TwoFactorMethod,
+} from "../types";
 
 // ---------- Platforms ----------
 
 export async function listPlatforms(): Promise<Platform[]> {
-  const db = await getDb();
-  return db.select<Platform[]>("SELECT * FROM platforms ORDER BY is_custom ASC, name ASC");
+  return invoke<Platform[]>("list_platforms");
 }
 
-export async function createPlatform(values: {
+export interface PlatformFormInput {
   name: string;
   icon: string | null;
   login_url: string | null;
   website_url: string | null;
-}): Promise<number> {
-  const db = await getDb();
-  const result = await db.execute(
-    "INSERT INTO platforms (name, icon, login_url, website_url, is_custom, created_at) VALUES ($1, $2, $3, $4, 1, $5)",
-    [values.name, values.icon, values.login_url, values.website_url, nowIso()],
-  );
-  return result.lastInsertId ?? 0;
+  logo_image_id?: number | null;
 }
 
-export async function updatePlatform(
-  id: number,
-  values: { name: string; icon: string | null; login_url: string | null; website_url: string | null },
-): Promise<void> {
-  const db = await getDb();
-  await db.execute("UPDATE platforms SET name = $1, icon = $2, login_url = $3, website_url = $4 WHERE id = $5", [
-    values.name,
-    values.icon,
-    values.login_url,
-    values.website_url,
-    id,
-  ]);
+export async function createPlatform(values: PlatformFormInput): Promise<number> {
+  return invoke<number>("create_platform", { input: values });
+}
+
+export async function updatePlatform(id: number, values: PlatformFormInput): Promise<void> {
+  await invoke<void>("update_platform", { id, input: values });
 }
 
 export async function deletePlatform(id: number): Promise<void> {
-  const db = await getDb();
-  await db.execute("DELETE FROM platforms WHERE id = $1", [id]);
+  await invoke<void>("delete_platform", { id });
 }
 
 export async function reassignAccountsPlatform(fromPlatformId: number, toPlatformId: number | null): Promise<void> {
-  const db = await getDb();
-  await db.execute("UPDATE accounts SET platform_id = $1, updated_at = $2 WHERE platform_id = $3", [
-    toPlatformId,
-    nowIso(),
-    fromPlatformId,
-  ]);
+  await invoke<void>("reassign_accounts_platform", { fromPlatformId, toPlatformId });
 }
 
 // ---------- Tags ----------
 
 export async function listTags(): Promise<Tag[]> {
-  const db = await getDb();
-  return db.select<Tag[]>("SELECT * FROM tags ORDER BY name ASC");
+  return invoke<Tag[]>("list_tags");
 }
 
-async function ensureTagIds(names: string[]): Promise<number[]> {
-  const db = await getDb();
-  const ids: number[] = [];
-  for (const raw of names) {
-    const name = raw.trim().toLowerCase();
-    if (!name) continue;
-    const existing = await db.select<Tag[]>("SELECT * FROM tags WHERE name = $1", [name]);
-    if (existing.length > 0) {
-      ids.push(existing[0].id);
-    } else {
-      const result = await db.execute("INSERT INTO tags (name) VALUES ($1)", [name]);
-      ids.push(result.lastInsertId ?? 0);
-    }
-  }
-  return ids;
+export interface TagWithUsage extends Tag {
+  accountsCount: number;
+  projectsCount: number;
+}
+
+export async function listTagsWithUsage(): Promise<TagWithUsage[]> {
+  return invoke<TagWithUsage[]>("list_tags_with_usage");
+}
+
+export async function createTag(name: string): Promise<number> {
+  return invoke<number>("create_tag", { name });
+}
+
+export async function renameTag(id: number, name: string): Promise<void> {
+  await invoke<void>("rename_tag", { id, name });
+}
+
+export async function deleteTag(id: number): Promise<void> {
+  await invoke<void>("delete_tag", { id });
 }
 
 // ---------- Accounts ----------
 
-interface AccountRow extends Account {
-  platform_name: string | null;
-  platform_icon: string | null;
-  platform_login_url: string | null;
-  platform_website_url: string | null;
-  platform_is_custom: number | null;
-  platform_created_at: string | null;
+export type AccountListScope = "active" | "trash" | "all";
+
+export async function listAccountsWithRelations(scope: AccountListScope = "active"): Promise<AccountWithRelations[]> {
+  return invoke<AccountWithRelations[]>("list_accounts_with_relations", { scope });
 }
 
-export async function listAccountsWithRelations(): Promise<AccountWithRelations[]> {
-  const db = await getDb();
-  const rows = await db.select<AccountRow[]>(
-    `SELECT a.*,
-            p.name AS platform_name, p.icon AS platform_icon,
-            p.login_url AS platform_login_url, p.website_url AS platform_website_url,
-            p.is_custom AS platform_is_custom, p.created_at AS platform_created_at
-     FROM accounts a
-     LEFT JOIN platforms p ON p.id = a.platform_id
-     ORDER BY a.name ASC`,
-  );
-
-  const tagRows = await db.select<{ account_id: number; id: number; name: string }[]>(
-    `SELECT at.account_id AS account_id, t.id AS id, t.name AS name
-     FROM account_tags at JOIN tags t ON t.id = at.tag_id`,
-  );
-
-  const tagsByAccount = new Map<number, Tag[]>();
-  for (const row of tagRows) {
-    const list = tagsByAccount.get(row.account_id) ?? [];
-    list.push({ id: row.id, name: row.name });
-    tagsByAccount.set(row.account_id, list);
-  }
-
-  return rows.map((row) => ({
-    ...row,
-    platform: row.platform_id
-      ? {
-          id: row.platform_id,
-          name: row.platform_name ?? "",
-          icon: row.platform_icon,
-          login_url: row.platform_login_url,
-          website_url: row.platform_website_url,
-          is_custom: row.platform_is_custom ?? 0,
-          created_at: row.platform_created_at ?? "",
-        }
-      : null,
-    tags: tagsByAccount.get(row.id) ?? [],
-  }));
-}
-
+// Fase 4 (SECURITY_AUDIT_PHASE_4.md): `password`/`notes`/`two_factor_*` chegam aqui em texto
+// puro — é o Rust quem cifra internamente antes de gravar (nunca mais `secretCommands.encrypt`
+// no frontend). `preserveFields` mantém o comportamento já existente de não sobrescrever um
+// campo que falhou ao descriptografar e que o usuário não editou.
 export interface SaveAccountInput {
   name: string;
   platform_id: number | null;
   category: string | null;
   username: string | null;
   email: string | null;
-  encrypted_password: string | null;
+  password: string | null;
   login_url: string | null;
   website_url: string | null;
-  notes: string | null;
+  notes: string;
   favorite: boolean;
   avatar_image_id: number | null;
   tagNames: string[];
+  projectIds: number[];
+  status: AccountStatus;
+  two_factor_enabled: boolean;
+  two_factor_method: TwoFactorMethod | null;
+  two_factor_phone: string | null;
+  two_factor_email: string | null;
+  two_factor_app: string | null;
+  two_factor_notes: string | null;
+  preserveFields: string[];
 }
 
 export async function createAccount(input: SaveAccountInput): Promise<number> {
-  const db = await getDb();
-  const now = nowIso();
-  const result = await db.execute(
-    `INSERT INTO accounts
-      (name, platform_id, category, username, email, encrypted_password, login_url, website_url, notes, favorite, avatar_image_id, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-    [
-      input.name,
-      input.platform_id,
-      input.category,
-      input.username,
-      input.email,
-      input.encrypted_password,
-      input.login_url,
-      input.website_url,
-      input.notes,
-      input.favorite ? 1 : 0,
-      input.avatar_image_id,
-      now,
-      now,
-    ],
-  );
-  const accountId = result.lastInsertId ?? 0;
-  await syncAccountTags(accountId, input.tagNames);
-  return accountId;
+  const { preserveFields, ...rest } = input;
+  return invoke<number>("create_account", { input: { ...rest, preserve_fields: preserveFields } });
 }
 
 export async function updateAccount(id: number, input: SaveAccountInput): Promise<void> {
-  const db = await getDb();
-  await db.execute(
-    `UPDATE accounts SET
-      name = $1, platform_id = $2, category = $3, username = $4, email = $5,
-      encrypted_password = $6, login_url = $7, website_url = $8, notes = $9,
-      favorite = $10, avatar_image_id = $11, updated_at = $12
-     WHERE id = $13`,
-    [
-      input.name,
-      input.platform_id,
-      input.category,
-      input.username,
-      input.email,
-      input.encrypted_password,
-      input.login_url,
-      input.website_url,
-      input.notes,
-      input.favorite ? 1 : 0,
-      input.avatar_image_id,
-      nowIso(),
-      id,
-    ],
-  );
-  await syncAccountTags(id, input.tagNames);
-}
-
-async function syncAccountTags(accountId: number, tagNames: string[]): Promise<void> {
-  const db = await getDb();
-  const tagIds = await ensureTagIds(tagNames);
-  await db.execute("DELETE FROM account_tags WHERE account_id = $1", [accountId]);
-  for (const tagId of tagIds) {
-    await db.execute("INSERT OR IGNORE INTO account_tags (account_id, tag_id) VALUES ($1, $2)", [accountId, tagId]);
-  }
+  const { preserveFields, ...rest } = input;
+  await invoke<void>("update_account", { id, input: { ...rest, preserve_fields: preserveFields } });
 }
 
 export async function deleteAccount(id: number): Promise<void> {
-  const db = await getDb();
-  await db.execute("DELETE FROM accounts WHERE id = $1", [id]);
+  await invoke<void>("delete_account", { id });
+}
+
+export async function restoreAccount(id: number): Promise<void> {
+  await invoke<void>("restore_account", { id });
+}
+
+export async function permanentlyDeleteAccount(id: number): Promise<void> {
+  await invoke<void>("permanently_delete_account", { id });
+}
+
+export async function archiveAccount(id: number): Promise<void> {
+  await invoke<void>("archive_account", { id });
+}
+
+export async function unarchiveAccount(id: number): Promise<void> {
+  await invoke<void>("unarchive_account", { id });
 }
 
 export async function toggleFavorite(id: number, favorite: boolean): Promise<void> {
-  const db = await getDb();
-  await db.execute("UPDATE accounts SET favorite = $1, updated_at = $2 WHERE id = $3", [
-    favorite ? 1 : 0,
-    nowIso(),
-    id,
-  ]);
+  await invoke<void>("toggle_favorite", { id, favorite });
 }
 
 // ---------- Settings ----------
 
 export async function getAllSettings(): Promise<Record<string, string>> {
-  const db = await getDb();
-  const rows = await db.select<{ key: string; value: string }[]>("SELECT * FROM settings");
-  const map: Record<string, string> = {};
-  for (const row of rows) map[row.key] = row.value;
-  return map;
+  return invoke<Record<string, string>>("get_all_settings");
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
-  const db = await getDb();
-  await db.execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = $2", [
-    key,
-    value,
-  ]);
+  await invoke<void>("set_setting", { key, value });
 }
 
 // ---------- Images ----------
 
-export async function listImages(): Promise<ImageRecord[]> {
-  const db = await getDb();
-  return db.select<ImageRecord[]>("SELECT * FROM images ORDER BY created_at DESC");
+export async function listImages(query?: string): Promise<ImageRecord[]> {
+  return invoke<ImageRecord[]>("list_images", { query: query ?? null });
+}
+
+export async function updateImageName(id: number, name: string): Promise<void> {
+  await invoke<void>("update_image_name", { id, name });
+}
+
+export async function countProjectsUsingImage(imageId: number): Promise<number> {
+  return invoke<number>("count_projects_using_image", { imageId });
+}
+
+export async function countPlatformsUsingImage(imageId: number): Promise<number> {
+  return invoke<number>("count_platforms_using_image", { imageId });
 }
 
 export async function getImageById(id: number): Promise<ImageRecord | null> {
-  const db = await getDb();
-  const rows = await db.select<ImageRecord[]>("SELECT * FROM images WHERE id = $1", [id]);
-  return rows[0] ?? null;
+  return invoke<ImageRecord | null>("get_image_by_id", { id });
 }
 
 export async function findImageByHash(hash: string): Promise<ImageRecord | null> {
-  const db = await getDb();
-  const rows = await db.select<ImageRecord[]>("SELECT * FROM images WHERE hash = $1", [hash]);
-  return rows[0] ?? null;
+  return invoke<ImageRecord | null>("find_image_by_hash", { hash });
 }
 
 export async function createImageRecord(filename: string, originalName: string, hash: string): Promise<ImageRecord> {
-  const existing = await findImageByHash(hash);
-  if (existing) return existing;
-
-  const db = await getDb();
-  const result = await db.execute("INSERT INTO images (filename, original_name, hash, created_at) VALUES ($1, $2, $3, $4)", [
-    filename,
-    originalName,
-    hash,
-    nowIso(),
-  ]);
-  return { id: result.lastInsertId ?? 0, filename, original_name: originalName, hash, created_at: nowIso() };
+  return invoke<ImageRecord>("create_image_record", { filename, originalName, hash });
 }
 
 export async function deleteImageRecord(id: number): Promise<void> {
-  const db = await getDb();
-  await db.execute("DELETE FROM images WHERE id = $1", [id]);
+  await invoke<void>("delete_image_record", { id });
 }
 
 export async function countAccountsUsingImage(imageId: number): Promise<number> {
-  const db = await getDb();
-  const rows = await db.select<{ count: number }[]>("SELECT COUNT(*) as count FROM accounts WHERE avatar_image_id = $1", [
-    imageId,
-  ]);
-  return rows[0]?.count ?? 0;
+  return invoke<number>("count_accounts_using_image", { imageId });
 }
 
 export async function clearAvatarForImage(imageId: number): Promise<void> {
-  const db = await getDb();
-  await db.execute("UPDATE accounts SET avatar_image_id = NULL WHERE avatar_image_id = $1", [imageId]);
+  await invoke<void>("clear_avatar_for_image", { imageId });
+}
+
+// ---------- Projects ----------
+
+export async function listProjectsWithRelations(): Promise<ProjectWithRelations[]> {
+  return invoke<ProjectWithRelations[]>("list_projects_with_relations");
+}
+
+export async function createProject(input: ProjectFormValues): Promise<number> {
+  return invoke<number>("create_project", { input });
+}
+
+export async function updateProject(id: number, input: ProjectFormValues): Promise<void> {
+  await invoke<void>("update_project", { id, input });
+}
+
+export async function deleteProject(id: number): Promise<void> {
+  await invoke<void>("delete_project", { id });
+}
+
+export async function toggleProjectFavorite(id: number, favorite: boolean): Promise<void> {
+  await invoke<void>("toggle_project_favorite", { id, favorite });
+}
+
+// ---------- Custom properties ----------
+
+export async function listPropertyDefinitions(): Promise<PropertyDefinition[]> {
+  return invoke<PropertyDefinition[]>("list_property_definitions");
+}
+
+export async function ensurePropertyDefinition(name: string, type: PropertyType): Promise<number> {
+  return invoke<number>("ensure_property_definition", { name, propertyType: type });
+}
+
+export async function listAccountProperties(accountId: number): Promise<AccountPropertyWithDefinition[]> {
+  return invoke<AccountPropertyWithDefinition[]>("list_account_properties", { accountId });
+}
+
+export async function createAccountProperty(
+  accountId: number,
+  definitionId: number,
+  value: string,
+  isSensitive: boolean,
+): Promise<number> {
+  return invoke<number>("create_account_property", { accountId, definitionId, value, isSensitive });
+}
+
+// Fase 4: `accountId` agora é obrigatório — o Rust confirma que a propriedade pertence a essa
+// conta antes de alterar/excluir (ver SECURITY_AUDIT_PHASE_4.md, seção sobre `properties.rs`).
+export async function updateAccountProperty(accountId: number, id: number, value: string, isSensitive: boolean): Promise<void> {
+  await invoke<void>("update_account_property", { accountId, id, value, isSensitive });
+}
+
+export async function deleteAccountProperty(accountId: number, id: number): Promise<void> {
+  await invoke<void>("delete_account_property", { accountId, id });
+}
+
+// ---------- Account history ----------
+
+export async function logHistory(accountId: number, event: string, detail?: string | null): Promise<void> {
+  await invoke<void>("log_account_history", { accountId, event, detail: detail ?? null });
+}
+
+export async function listAccountHistory(accountId: number): Promise<AccountHistoryEntry[]> {
+  return invoke<AccountHistoryEntry[]>("list_account_history", { accountId });
 }
 
 // ---------- Security questions ----------
 
 export async function listSecurityQuestions(): Promise<SecurityQuestion[]> {
-  const db = await getDb();
-  return db.select<SecurityQuestion[]>("SELECT id, question, share_index, created_at FROM security_questions ORDER BY created_at ASC");
+  return invoke<SecurityQuestion[]>("list_security_questions");
 }

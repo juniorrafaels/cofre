@@ -1,40 +1,106 @@
 import { useEffect, useState } from "react";
-import { Copy, ExternalLink, Eye, EyeOff, Pencil, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, CheckCircle2, Copy, ExternalLink, Eye, EyeOff, Pencil, ShieldAlert, Trash2 } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Avatar } from "../ui/Avatar";
-import type { AccountWithRelations } from "../../types";
-import { secretCommands, openLoginUrl } from "../../lib/tauri";
-import { useCopy } from "../../lib/useCopy";
+import { AccountPropertiesSection } from "./AccountPropertiesSection";
+import { AccountHistorySection } from "./AccountHistorySection";
+import { ACCOUNT_STATUS_LABELS, TWO_FACTOR_METHOD_LABELS, type AccountWithRelations } from "../../types";
+import { accountSecretCommands, openLoginUrl } from "../../lib/tauri";
+import { useCopy, useCopySecret } from "../../lib/useCopy";
 import { useToastStore } from "../../store/useToastStore";
+import { tryFetch, DECRYPTION_FAILED_MESSAGE } from "../../lib/secretFields";
 
 interface Props {
   account: AccountWithRelations | null;
   onClose: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onArchiveToggle: () => void;
 }
 
-export function AccountDetailModal({ account, onClose, onEdit, onDelete }: Props) {
-  const [password, setPassword] = useState("");
+const STATUS_COLORS: Record<string, string> = {
+  active: "bg-[var(--color-success)]",
+  blocked: "bg-[var(--color-danger)]",
+  recovering: "bg-amber-500",
+  suspended: "bg-amber-500",
+  disabled: "bg-[var(--color-text-muted)]",
+  archived: "bg-[var(--color-text-muted)]",
+};
+
+// `twoFactorEmail` já vem decifrado do estado do componente (Fase 4: não existe mais
+// `account.two_factor_email` em texto cifrado neste tipo — ver `accountSecretCommands.getTwoFactorDetails`).
+function computeHealth(account: AccountWithRelations, twoFactorEmail: string) {
+  const checks = [
+    { ok: !!account.avatar_image_id, label: "Foto cadastrada" },
+    { ok: account.projects.length > 0, label: "Vinculada a um projeto" },
+    { ok: !!account.two_factor_enabled, label: "2FA configurado" },
+    { ok: !!(twoFactorEmail || account.email), label: "E-mail de recuperação/contato definido" },
+    { ok: account.status === "active", label: "Status ativo" },
+  ];
+  const okCount = checks.filter((c) => c.ok).length;
+  return { checks, okCount, total: checks.length };
+}
+
+const EMPTY_TWO_FACTOR = { phone: "", email: "", app: "", notes: "" };
+
+export function AccountDetailModal({ account, onClose, onEdit, onDelete, onArchiveToggle }: Props) {
+  const [tab, setTab] = useState<"details" | "properties" | "history">("details");
+  const [twoFactor, setTwoFactor] = useState(EMPTY_TWO_FACTOR);
+  const [notes, setNotes] = useState("");
+  // Campos que falharam ao descriptografar (Fase 2: nunca exibimos o ciphertext bruto nem
+  // assumimos que é texto puro legado — a migração automática no unlock já cuidou disso).
+  const [decryptErrors, setDecryptErrors] = useState<Set<string>>(new Set());
   const copy = useCopy();
+  const copySecret = useCopySecret();
   const push = useToastStore((s) => s.push);
 
   useEffect(() => {
-    setPassword("");
+    setTab("details");
+    setTwoFactor(EMPTY_TWO_FACTOR);
+    setNotes("");
+    setDecryptErrors(new Set());
+    if (!account) return;
+    let cancelled = false;
+    Promise.all([
+      tryFetch(() => accountSecretCommands.getTwoFactorDetails(account.id)),
+      tryFetch(() => accountSecretCommands.getNotes(account.id)),
+    ]).then(([twoFactorR, notesR]) => {
+      if (cancelled) return;
+      setTwoFactor({
+        phone: twoFactorR.ok ? twoFactorR.value.phone : "",
+        email: twoFactorR.ok ? twoFactorR.value.email : "",
+        app: twoFactorR.ok ? twoFactorR.value.app : "",
+        notes: twoFactorR.ok ? twoFactorR.value.notes : "",
+      });
+      setNotes(notesR.ok ? notesR.value : "");
+      const failed = new Set<string>();
+      if (!twoFactorR.ok) {
+        failed.add("phone");
+        failed.add("email");
+        failed.add("app");
+        failed.add("two_factor_notes");
+      }
+      if (!notesR.ok) failed.add("notes");
+      setDecryptErrors(failed);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [account?.id]);
 
   if (!account) return null;
 
   const loginUrl = account.login_url || account.platform?.login_url || "";
+  const health = computeHealth(account, twoFactor.email);
 
+  // Sem cache: cada reveal/cópia decifra de novo em vez de guardar o plaintext em estado do
+  // React entre chamadas — decifrar com a DEK já em memória é barato, e isso reduz o tempo em
+  // que a senha decifrada fica pendurada em algum lugar do frontend.
   async function ensurePassword(): Promise<string> {
-    if (password) return password;
-    if (!account?.encrypted_password) return "";
-    const plaintext = await secretCommands.decrypt(account.encrypted_password);
-    setPassword(plaintext);
-    return plaintext;
+    if (!account?.has_password) return "";
+    return accountSecretCommands.revealPassword(account.id);
   }
 
   async function handleLogin() {
@@ -46,68 +112,131 @@ export function AccountDetailModal({ account, onClose, onEdit, onDelete }: Props
   }
 
   async function handleCopyPassword() {
-    try {
-      const plaintext = await ensurePassword();
-      copy(plaintext, "Senha");
-    } catch (err) {
-      push(`Não foi possível copiar a senha: ${String(err)}`, "error");
-    }
+    // Decifra e copia inteiramente no backend (não usa `ensurePassword`/`password` — este botão
+    // só copia, não precisa que o plaintext passe pelo estado do React).
+    if (!account) return;
+    await copySecret(account.has_password, (seconds) => accountSecretCommands.copyPassword(account.id, seconds), "Senha");
   }
 
   return (
     <Modal open={!!account} onClose={onClose} title={account.platform?.name ?? "Conta"} width="md">
       <div className="mb-4 flex items-center gap-3">
-        <Avatar imageId={account.avatar_image_id} platformIcon={account.platform?.icon ?? null} size={44} />
-        <div>
+        <Avatar
+          imageId={account.avatar_image_id}
+          platformIcon={account.platform?.icon ?? null}
+          platformLogoImageId={account.platform?.logo_image_id}
+          size={44}
+        />
+        <div className="min-w-0 flex-1">
           <p className="text-base font-semibold">{account.name}</p>
           <p className="text-sm text-[var(--color-text-muted)]">{account.category || account.platform?.name}</p>
         </div>
+        <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs text-[var(--color-text)]">
+          <span className={`h-1.5 w-1.5 rounded-full ${STATUS_COLORS[account.status] ?? "bg-[var(--color-text-muted)]"}`} />
+          {ACCOUNT_STATUS_LABELS[account.status]}
+        </span>
       </div>
 
-      <div className="space-y-3">
-        <Field
-          label="Username"
-          value={account.username || "—"}
-          onCopy={() => copy(account.username, "Username")}
-        />
-        <Field label="E-mail" value={account.email || "—"} onCopy={() => copy(account.email, "E-mail")} />
+      <div className="mb-4 flex gap-1 border-b border-[var(--color-border)]">
+        {(
+          [
+            { key: "details", label: "Detalhes" },
+            { key: "properties", label: "Propriedades" },
+            { key: "history", label: "Histórico" },
+          ] as const
+        ).map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`px-3 py-2 text-sm ${tab === t.key ? "border-b-2 border-[var(--color-accent)] text-[var(--color-accent)] font-medium" : "text-[var(--color-text-muted)]"}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
 
-        <div>
-          <p className="mb-1.5 text-xs font-medium text-[var(--color-text-muted)]">Senha</p>
-          <div className="flex items-center gap-1.5">
-            <div className="flex-1">
-              <PasswordFieldLazy account={account} password={password} onReveal={ensurePassword} />
+      {tab === "details" && (
+        <div className="space-y-3">
+          <Field label="Username" value={account.username || "—"} onCopy={() => copy(account.username, "Username")} />
+          <Field label="E-mail" value={account.email || "—"} onCopy={() => copy(account.email, "E-mail")} />
+
+          <div>
+            <p className="mb-1.5 text-xs font-medium text-[var(--color-text-muted)]">Senha</p>
+            <div className="flex items-center gap-1.5">
+              <div className="flex-1">
+                <PasswordFieldLazy account={account} onReveal={ensurePassword} />
+              </div>
+              <button onClick={handleCopyPassword} className="rounded-md p-2 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]" title="Copiar senha">
+                <Copy size={15} />
+              </button>
             </div>
-            <button onClick={handleCopyPassword} className="rounded-md p-2 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]" title="Copiar senha">
-              <Copy size={15} />
-            </button>
           </div>
-        </div>
 
-        {loginUrl && (
-          <Field label="URL de login" value={loginUrl} mono />
-        )}
+          {loginUrl && <Field label="URL de login" value={loginUrl} mono />}
 
-        {account.notes && (
-          <div>
-            <p className="mb-1 text-xs font-medium text-[var(--color-text-muted)]">Observações</p>
-            <p className="text-sm text-[var(--color-text)]">{account.notes}</p>
-          </div>
-        )}
+          {!!account.two_factor_enabled && (
+            <div className="rounded-lg border border-[var(--color-border)] p-2.5">
+              <p className="mb-1 text-xs font-medium text-[var(--color-text-muted)]">Autenticação em dois fatores</p>
+              <p className="text-sm text-[var(--color-text)]">{account.two_factor_method ? TWO_FACTOR_METHOD_LABELS[account.two_factor_method] : "—"}</p>
+              {twoFactor.phone && <p className="text-xs text-[var(--color-text-muted)]">Telefone: {twoFactor.phone}</p>}
+              {twoFactor.email && <p className="text-xs text-[var(--color-text-muted)]">E-mail: {twoFactor.email}</p>}
+              {twoFactor.app && <p className="text-xs text-[var(--color-text-muted)]">App: {twoFactor.app}</p>}
+              {twoFactor.notes && <p className="text-xs text-[var(--color-text-muted)]">{twoFactor.notes}</p>}
+              {(decryptErrors.has("phone") || decryptErrors.has("email") || decryptErrors.has("app") || decryptErrors.has("two_factor_notes")) && (
+                <p className="text-xs text-[var(--color-danger)]">{DECRYPTION_FAILED_MESSAGE}</p>
+              )}
+            </div>
+          )}
 
-        {account.tags.length > 0 && (
-          <div>
-            <p className="mb-1.5 text-xs font-medium text-[var(--color-text-muted)]">Tags</p>
-            <div className="flex flex-wrap gap-1.5">
-              {account.tags.map((tag) => (
-                <span key={tag.id} className="rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs text-[var(--color-text-muted)]">
-                  {tag.name}
-                </span>
+          {(notes || decryptErrors.has("notes")) && (
+            <div>
+              <p className="mb-1 text-xs font-medium text-[var(--color-text-muted)]">Observações</p>
+              {decryptErrors.has("notes") ? (
+                <p className="text-sm text-[var(--color-danger)]">{DECRYPTION_FAILED_MESSAGE}</p>
+              ) : (
+                <p className="text-sm text-[var(--color-text)]">{notes}</p>
+              )}
+            </div>
+          )}
+
+          {account.tags.length > 0 && (
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-[var(--color-text-muted)]">Tags</p>
+              <div className="flex flex-wrap gap-1.5">
+                {account.tags.map((tag) => (
+                  <span key={tag.id} className="rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs text-[var(--color-text-muted)]">
+                    {tag.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-[var(--color-border)] p-2.5">
+            <div className="mb-1.5 flex items-center justify-between">
+              <p className="text-xs font-medium text-[var(--color-text-muted)]">Saúde da conta</p>
+              <span className="text-xs text-[var(--color-text-muted)]">
+                {health.okCount} de {health.total}
+              </span>
+            </div>
+            <div className="space-y-1">
+              {health.checks.map((c) => (
+                <div key={c.label} className="flex items-center gap-1.5 text-xs">
+                  {c.ok ? (
+                    <CheckCircle2 size={13} className="text-[var(--color-success)]" />
+                  ) : (
+                    <ShieldAlert size={13} className="text-amber-500" />
+                  )}
+                  <span className={c.ok ? "text-[var(--color-text-muted)]" : "text-[var(--color-text)]"}>{c.label}</span>
+                </div>
               ))}
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {tab === "properties" && <AccountPropertiesSection accountId={account.id} />}
+      {tab === "history" && <AccountHistorySection accountId={account.id} />}
 
       <div className="mt-6 flex flex-wrap gap-2 border-t border-[var(--color-border)] pt-4">
         <Button variant="primary" onClick={handleLogin}>
@@ -115,6 +244,17 @@ export function AccountDetailModal({ account, onClose, onEdit, onDelete }: Props
         </Button>
         <Button variant="secondary" onClick={onEdit}>
           <Pencil size={15} /> Editar
+        </Button>
+        <Button variant="secondary" onClick={onArchiveToggle}>
+          {account.status === "archived" ? (
+            <>
+              <ArchiveRestore size={15} /> Desarquivar
+            </>
+          ) : (
+            <>
+              <Archive size={15} /> Arquivar
+            </>
+          )}
         </Button>
         <Button variant="danger" className="ml-auto" onClick={onDelete}>
           <Trash2 size={15} /> Excluir
@@ -142,29 +282,31 @@ function Field({ label, value, onCopy, mono }: { label: string; value: string; o
 
 function PasswordFieldLazy({
   account,
-  password,
   onReveal,
 }: {
   account: AccountWithRelations;
-  password: string;
   onReveal: () => Promise<string>;
 }) {
   const [revealed, setRevealed] = useState(false);
-  const [value, setValue] = useState(password);
+  const [value, setValue] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setValue(password);
+    setValue("");
     setRevealed(false);
-  }, [password, account.id]);
+  }, [account.id]);
 
-  if (!account.encrypted_password) {
+  if (!account.has_password) {
     return <p className="text-sm text-[var(--color-text-muted)]">Nenhuma senha cadastrada.</p>;
   }
 
   async function toggleReveal() {
     if (revealed) {
+      // Ao esconder de novo, o valor decifrado é removido do estado do React (não fica
+      // pendurado em memória só porque a UI não o exibe mais) — precisa decifrar de novo
+      // para revelar uma próxima vez, o que é barato (a DEK já está em memória no Rust).
       setRevealed(false);
+      setValue("");
       return;
     }
     setLoading(true);

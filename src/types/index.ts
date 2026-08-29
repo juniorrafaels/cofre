@@ -5,12 +5,42 @@ export interface Platform {
   login_url: string | null;
   website_url: string | null;
   is_custom: number;
+  logo_image_id: number | null;
   created_at: string;
 }
 
 export interface Tag {
   id: number;
   name: string;
+}
+
+export interface Project {
+  id: number;
+  name: string;
+  description: string | null;
+  color: string | null;
+  avatar_image_id: number | null;
+  favorite: number;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectWithRelations extends Project {
+  tags: Tag[];
+  accountsCount: number;
+  platformNames: string[];
+}
+
+export interface ProjectFormValues {
+  id?: number;
+  name: string;
+  description: string;
+  color: string | null;
+  avatar_image_id: number | null;
+  favorite: boolean;
+  notes: string;
+  tags: string[];
 }
 
 export interface SecurityQuestion {
@@ -40,10 +70,36 @@ export interface ImageRecord {
   id: number;
   filename: string;
   original_name: string | null;
+  name: string | null;
   hash: string;
   created_at: string;
 }
 
+export type AccountStatus = "active" | "blocked" | "recovering" | "suspended" | "disabled" | "archived";
+export type TwoFactorMethod = "sms" | "whatsapp" | "email" | "authenticator" | "security_key" | "other";
+
+export const ACCOUNT_STATUS_LABELS: Record<AccountStatus, string> = {
+  active: "Ativa",
+  blocked: "Bloqueada",
+  recovering: "Em recuperação",
+  suspended: "Suspensa",
+  disabled: "Desativada",
+  archived: "Arquivada",
+};
+
+export const TWO_FACTOR_METHOD_LABELS: Record<TwoFactorMethod, string> = {
+  sms: "SMS",
+  whatsapp: "WhatsApp",
+  email: "E-mail",
+  authenticator: "Aplicativo autenticador",
+  security_key: "Chave de segurança",
+  other: "Outro",
+};
+
+// Fase 4 (SECURITY_AUDIT_PHASE_4.md): a senha, as observações e os campos de 2FA nunca mais
+// chegam cifrados a este tipo — só `has_password` sinaliza presença. O plaintext (quando
+// necessário) vem de `accountSecretCommands.revealPassword/getNotes/getTwoFactorDetails`, sob
+// pedido explícito e por ID, nunca junto com a listagem.
 export interface Account {
   id: number;
   name: string;
@@ -51,12 +107,15 @@ export interface Account {
   category: string | null;
   username: string | null;
   email: string | null;
-  encrypted_password: string | null;
+  has_password: boolean;
   login_url: string | null;
   website_url: string | null;
-  notes: string | null;
   favorite: number;
   avatar_image_id: number | null;
+  status: AccountStatus;
+  deleted_at: string | null;
+  two_factor_enabled: number;
+  two_factor_method: TwoFactorMethod | null;
   created_at: string;
   updated_at: string;
 }
@@ -64,6 +123,7 @@ export interface Account {
 export interface AccountWithRelations extends Account {
   platform: Platform | null;
   tags: Tag[];
+  projects: Project[];
 }
 
 export interface AccountFormValues {
@@ -80,6 +140,61 @@ export interface AccountFormValues {
   favorite: boolean;
   tags: string[];
   avatar_image_id: number | null;
+  projectIds: number[];
+  status: AccountStatus;
+  two_factor_enabled: boolean;
+  two_factor_method: TwoFactorMethod | null;
+  two_factor_phone: string;
+  two_factor_email: string;
+  two_factor_app: string;
+  two_factor_notes: string;
+}
+
+export type PropertyType = "text" | "number" | "phone" | "email" | "url" | "date" | "boolean" | "longtext";
+
+export const PROPERTY_TYPE_LABELS: Record<PropertyType, string> = {
+  text: "Texto",
+  number: "Número",
+  phone: "Telefone",
+  email: "E-mail",
+  url: "URL",
+  date: "Data",
+  boolean: "Sim/Não",
+  longtext: "Texto longo",
+};
+
+export interface PropertyDefinition {
+  id: number;
+  name: string;
+  type: PropertyType;
+  created_at: string;
+}
+
+// `value` é sempre `null` para propriedades sensíveis na listagem (Fase 4) — `has_value` indica
+// se existe algo cadastrado, sem expor o ciphertext. Para não sensíveis, `value` é o próprio
+// texto puro (nunca foi segredo).
+export interface AccountProperty {
+  id: number;
+  account_id: number;
+  definition_id: number;
+  value: string | null;
+  has_value: boolean;
+  is_sensitive: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccountPropertyWithDefinition extends AccountProperty {
+  name: string;
+  type: PropertyType;
+}
+
+export interface AccountHistoryEntry {
+  id: number;
+  account_id: number;
+  event: string;
+  detail: string | null;
+  created_at: string;
 }
 
 export type VaultStatusKind = "loading" | "uninitialized" | "locked" | "unlocked";
@@ -87,12 +202,31 @@ export type VaultStatusKind = "loading" | "uninitialized" | "locked" | "unlocked
 export type ThemePreference = "light" | "dark" | "system";
 export type ViewMode = "grid" | "list";
 
+export type ListColumnKey = "avatar" | "name" | "platform" | "username" | "email" | "project" | "status" | "tags" | "updated_at" | "two_factor";
+
+export const LIST_COLUMN_LABELS: Record<ListColumnKey, string> = {
+  avatar: "Foto",
+  name: "Nome",
+  platform: "Plataforma",
+  username: "Username",
+  email: "E-mail",
+  project: "Projeto",
+  status: "Status",
+  tags: "Tags",
+  updated_at: "Última atualização",
+  two_factor: "2FA",
+};
+
+export const DEFAULT_LIST_COLUMNS: ListColumnKey[] = ["avatar", "name", "platform", "username", "status"];
+
 export interface AppSettings {
   theme: ThemePreference;
   autoLockMinutes: number;
+  lockOnMinimize: boolean;
   clipboardClearEnabled: boolean;
   clipboardClearSeconds: number;
   viewMode: ViewMode;
+  listColumns: ListColumnKey[];
 }
 
 export type SortField = "name" | "created_at" | "updated_at";
@@ -102,4 +236,8 @@ export type ViewState =
   | { type: "dashboard" }
   | { type: "platform"; platformId: number }
   | { type: "favorites" }
-  | { type: "settings" };
+  | { type: "settings" }
+  | { type: "projects" }
+  | { type: "project"; projectId: number }
+  | { type: "archived" }
+  | { type: "trash" };

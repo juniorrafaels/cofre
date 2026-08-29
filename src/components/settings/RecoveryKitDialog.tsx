@@ -9,9 +9,13 @@ import type { SecurityQuestion } from "../../types";
 interface Props {
   open: boolean;
   onClose: () => void;
+  // Quando presente, o kit inclui a Recovery Key recém-gerada (só é passada uma vez, pelo
+  // chamador — este componente nunca busca ou re-exibe uma chave antiga, porque não existe:
+  // o backend não guarda a chave em texto puro em lugar nenhum).
+  recoveryKey?: string | null;
 }
 
-export function ExportQuestionsDialog({ open, onClose }: Props) {
+export function RecoveryKitDialog({ open, onClose, recoveryKey }: Props) {
   const [step, setStep] = useState<"warning" | "sheet">("warning");
   const [questions, setQuestions] = useState<SecurityQuestion[]>([]);
 
@@ -44,21 +48,44 @@ export function ExportQuestionsDialog({ open, onClose }: Props) {
           </div>
 
           <div id="print-sheet" className="rounded-xl border border-[var(--color-border)] bg-white p-10 text-black print:border-0 print:p-0">
-            <h1 className="mb-1 text-xl font-bold">Perguntas de segurança para recuperação</h1>
+            <h1 className="mb-1 text-xl font-bold">Cofre — Kit de recuperação</h1>
             <p className="mb-6 text-sm text-gray-600">
-              Guarde este documento em local seguro e privado. Preencha as respostas à mão e não digitalize nem envie por
-              e-mail ou mensageiro.
+              Este documento pode permitir acesso ao seu cofre. Guarde-o fisicamente em local seguro e privado. Não
+              digitalize, fotografe nem envie por e-mail, WhatsApp, Discord ou qualquer outro serviço.
             </p>
-            <ol className="space-y-5">
-              {questions.map((q, i) => (
-                <li key={q.id}>
-                  <p className="font-medium">
-                    {i + 1}. {q.question}
-                  </p>
-                  <div className="mt-2 h-px w-full border-b border-dashed border-gray-400" />
-                </li>
-              ))}
-            </ol>
+
+            {recoveryKey && (
+              <div className="mb-8">
+                <h2 className="mb-2 text-base font-semibold">Recovery Key</h2>
+                <p className="mb-2 text-sm text-gray-600">
+                  Método de recuperação mais forte. Basta esta chave para redefinir sua senha mestra — não anote as
+                  respostas das perguntas abaixo no mesmo local que esta chave, se possível.
+                </p>
+                <p className="rounded-lg border border-gray-400 bg-gray-50 p-3 text-center font-mono text-lg tracking-wider">
+                  {recoveryKey}
+                </p>
+              </div>
+            )}
+
+            {questions.length > 0 && (
+              <div>
+                <h2 className="mb-2 text-base font-semibold">Perguntas de segurança</h2>
+                <p className="mb-4 text-sm text-gray-600">
+                  Preencha as respostas à mão, depois de imprimir — o app nunca grava suas respostas em texto puro, então
+                  não tem como reimprimi-las depois.
+                </p>
+                <ol className="space-y-5">
+                  {questions.map((q, i) => (
+                    <li key={q.id}>
+                      <p className="font-medium">
+                        {i + 1}. {q.question}
+                      </p>
+                      <div className="mt-2 h-px w-full border-b border-dashed border-gray-400" />
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
           </div>
         </div>
       </div>,
@@ -67,13 +94,14 @@ export function ExportQuestionsDialog({ open, onClose }: Props) {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Exportar perguntas de segurança" width="sm">
+    <Modal open={open} onClose={onClose} title="Exportar kit de recuperação" width="sm">
       <div className="flex gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-amber-900">
         <AlertTriangle size={18} className="mt-0.5 shrink-0" />
         <div className="text-sm">
           <p className="font-semibold">Atenção</p>
           <p className="mt-1">
-            Este documento contém as perguntas usadas para recuperar o seu cofre. Guarde-o em um local seguro e privado.
+            Este documento pode conter a Recovery Key e/ou as perguntas usadas para recuperar o seu cofre. Guarde-o em
+            um local seguro e privado.
           </p>
           <p className="mt-1">Não envie este arquivo por e-mail, WhatsApp, Discord ou outros serviços públicos.</p>
           <p className="mt-1">Recomenda-se imprimir e armazenar fisicamente em um local seguro.</p>
