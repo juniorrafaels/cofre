@@ -223,6 +223,11 @@ export const LIST_COLUMN_LABELS: Record<ListColumnKey, string> = {
 
 export const DEFAULT_LIST_COLUMNS: ListColumnKey[] = ["avatar", "name", "platform", "username", "status"];
 
+// Níveis discretos do controle de escala das listagens/cards (seção 4 do pedido de ajuste) —
+// zoom livre não é permitido, só esses passos, para nunca quebrar o layout.
+export const LIST_SCALE_LEVELS = [75, 90, 100, 110, 125, 150, 175, 200] as const;
+export type ListScale = (typeof LIST_SCALE_LEVELS)[number];
+
 export interface AppSettings {
   theme: ThemePreference;
   autoLockMinutes: number;
@@ -231,7 +236,37 @@ export interface AppSettings {
   clipboardClearSeconds: number;
   viewMode: ViewMode;
   listColumns: ListColumnKey[];
+  listScale: ListScale;
 }
+
+// ---------- Gerador de senhas (Configurações → Gerador de Senhas) ----------
+
+export type PasswordCharClass = "numbers" | "upper" | "lower" | "special";
+export type PasswordCountMode = "auto" | "fixed";
+
+export interface PasswordClassOptions {
+  enabled: boolean;
+  mode: PasswordCountMode;
+  count: number;
+}
+
+export interface PasswordGeneratorOptions {
+  length: number;
+  numbers: PasswordClassOptions;
+  upper: PasswordClassOptions;
+  lower: PasswordClassOptions;
+  special: PasswordClassOptions;
+  startType: PasswordCharClass | null;
+  endType: PasswordCharClass | null;
+  avoidSequences: boolean;
+}
+
+export const PASSWORD_CHAR_CLASS_LABELS: Record<PasswordCharClass, string> = {
+  numbers: "Números",
+  upper: "Maiúsculas",
+  lower: "Minúsculas",
+  special: "Especiais",
+};
 
 export type SortField = "name" | "created_at" | "updated_at";
 export type SortDirection = "asc" | "desc";

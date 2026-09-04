@@ -51,6 +51,23 @@ if (!fs.existsSync(compiledExePath)) {
   process.exit(1);
 }
 
+// No Windows, `resource_dir()` do Tauri SEMPRE resolve para a pasta do .exe em execução (dev,
+// release "cru" ou instalado) — nunca para o cargo build dir. O Cargo já copia os resources
+// declarados em tauri.conf.json para `target/release/resources` ao lado do binário compilado;
+// esse .exe permanente vive fora dessa pasta (na raiz do projeto), então precisa da mesma pasta
+// `resources` copiada para o lado dele aqui, ou o app roda sem nenhuma imagem padrão de
+// plataforma (BUG CRÍTICO já visto em produção: `$APPDATA/images` fica vazio após excluir e
+// recriar o cofre porque o provisionamento não acha os arquivos de origem).
+const compiledResourcesDir = path.join(targetDir, 'release', 'resources');
+const finalResourcesDir = path.join(projectRoot, 'resources');
+
+if (!fs.existsSync(compiledResourcesDir)) {
+  console.error(`\nErro: pasta de resources não encontrada em:\n${compiledResourcesDir}`);
+  console.error('O build não gerou os resources declarados em tauri.conf.json (ex.: imagens padrão das plataformas).');
+  console.error('Publicar o .exe sem isso deixaria o app sem as imagens padrão. Abortando.');
+  process.exit(1);
+}
+
 const tempPath = path.join(projectRoot, `.${finalExeName}.tmp`);
 
 try {
@@ -70,5 +87,16 @@ try {
   throw err;
 }
 
+// ATENÇÃO — não remova esta cópia nem troque por "copiar só o .exe": no Windows o Tauri resolve
+// `resource_dir()` sempre em relação à pasta do executável em execução (não ao cargo build dir).
+// Se este .exe permanente for publicado/movido sem a pasta `resources/` ao lado dele, o app abre
+// normalmente mas o provisionamento das imagens padrão das plataformas falha silenciosamente e
+// `$APPDATA/images` fica vazio (bug real já visto em produção — ver git blame desta seção).
+// Sincroniza a pasta de resources ao lado do .exe (remove a antiga e recopia inteira — são só
+// assets estáticos pequenos, não precisa de um merge incremental).
+fs.rmSync(finalResourcesDir, { recursive: true, force: true });
+fs.cpSync(compiledResourcesDir, finalResourcesDir, { recursive: true });
+
 console.log(`\n${finalExeName} atualizado com sucesso.`);
 console.log(finalExePath);
+console.log(`Resources sincronizados em: ${finalResourcesDir}`);

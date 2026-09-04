@@ -3,7 +3,7 @@ use crate::crypto::{self, KdfParams};
 use crate::db;
 use crate::state::VaultState;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use zeroize::Zeroizing;
 
 #[derive(Serialize)]
@@ -177,6 +177,69 @@ pub fn change_master_password(
     Ok(())
 }
 
+/// Confirma a senha mestra atual sem alterar nada — usado pela Etapa 1 da exclusão do cofre
+/// (Configurações → Dados → Zona de perigo). Reaproveita a mesma verificação real (decifra o
+/// `wrapped_dek`) usada por `change_master_password`/Recovery Key/perguntas de segurança — nunca
+/// uma comparação de flag decidida no frontend.
+#[tauri::command]
+pub fn verify_master_password(app: AppHandle, password: String) -> Result<(), String> {
+    let password = Zeroizing::new(password);
+    let conn = db::open(&app)?;
+    verify_current_password(&conn, &password)?;
+    Ok(())
+}
+
+/// Apaga todas as linhas de todas as tabelas do cofre (mesmo conjunto que
+/// `backup::restore_backup_payload` apaga antes de restaurar um backup — só que aqui nada é
+/// reinserido depois). Extraída do command para ser testável com uma `Connection` de teste, sem
+/// precisar de um `AppHandle` real.
+fn wipe_all_tables(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "DELETE FROM account_history;
+         DELETE FROM account_properties;
+         DELETE FROM project_tags;
+         DELETE FROM account_projects;
+         DELETE FROM account_tags;
+         DELETE FROM recovery_attempts;
+         DELETE FROM security_questions;
+         DELETE FROM accounts;
+         DELETE FROM custom_property_definitions;
+         DELETE FROM projects;
+         DELETE FROM images;
+         DELETE FROM tags;
+         DELETE FROM platform_seed_state;
+         DELETE FROM platforms;
+         DELETE FROM settings;
+         DELETE FROM vault_meta;",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Exclui completamente o cofre desta instalação (seção "Zona de perigo" em Configurações →
+/// Dados): reautentica a senha mestra (mesmo mecanismo de `verify_master_password`, nunca um
+/// flag do frontend), apaga todas as linhas de todas as tabelas e os arquivos da biblioteca de
+/// imagens em disco (`$APPDATA/images` — as cópias importadas para o cofre, nunca arquivos
+/// originais do usuário fora dessa pasta), e limpa a DEK da memória. O arquivo `vault.db`
+/// continua existindo (schema intacto), mas sem `vault_meta` — exatamente o estado que
+/// `vault_status` reporta como `initialized: false`, ou seja, o mesmo estado de uma instalação
+/// nova. A UI já exige duas confirmações independentes (senha mestra + digitar "EXCLUIR") antes
+/// de chamar este comando.
+#[tauri::command]
+pub fn delete_vault(app: AppHandle, state: State<VaultState>, password: String) -> Result<(), String> {
+    let password = Zeroizing::new(password);
+    let conn = db::open(&app)?;
+    verify_current_password(&conn, &password)?;
+    wipe_all_tables(&conn)?;
+    drop(conn);
+
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = std::fs::remove_dir_all(dir.join("images"));
+    }
+
+    state.clear();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +277,135 @@ mod tests {
         let conn = fixture_conn_with_password("senha-correta-XSS_TEST");
         let dek = verify_current_password(&conn, &Zeroizing::new("senha-correta-XSS_TEST".to_string())).unwrap();
         assert_eq!(dek, [5u8; 32]);
+    }
+
+    // Seção 1/6/7 do pedido de exclusão do cofre: uma senha errada não pode chegar a apagar
+    // nada — `delete_vault` só chama `wipe_all_tables` depois que `verify_current_password`
+    // retorna com sucesso, então testar essa ordem aqui é o equivalente, sem precisar de um
+    // `AppHandle` real, a testar o command inteiro.
+    #[test]
+    fn wrong_password_never_reaches_the_wipe_step() {
+        let conn = fixture_conn_with_password("senha-correta-XSS_TEST");
+        let result = verify_current_password(&conn, &Zeroizing::new("senha-errada".to_string()));
+        assert!(result.is_err());
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM vault_meta", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1, "vault_meta não deve ser tocado quando a senha mestra está errada");
+    }
+
+    // Seção 6 do pedido: a exclusão precisa remover contas, projetos, plataformas
+    // personalizadas, configurações e todos os dados relacionados ao cofre.
+    #[test]
+    fn wipe_all_tables_removes_every_table() {
+        let conn = fixture_conn_with_password("senha-correta-XSS_TEST");
+        conn.execute(
+            "INSERT INTO projects (name, favorite, created_at, updated_at) VALUES ('Projeto teste', 0, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO accounts (name, created_at, updated_at, status) VALUES ('Conta teste', 'now', 'now', 'active')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO platforms (name, is_custom, created_at, sort_order) VALUES ('Plataforma custom', 1, 'now', 999)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')", []).unwrap();
+
+        let platforms_before: i64 = conn.query_row("SELECT COUNT(*) FROM platforms", [], |row| row.get(0)).unwrap();
+        assert!(platforms_before > 0, "fixture deveria ter plataformas (seeds + a customizada)");
+
+        wipe_all_tables(&conn).unwrap();
+
+        for table in [
+            "vault_meta",
+            "platforms",
+            "platform_seed_state",
+            "accounts",
+            "projects",
+            "tags",
+            "images",
+            "settings",
+            "security_questions",
+            "recovery_attempts",
+            "account_history",
+            "account_properties",
+            "custom_property_definitions",
+        ] {
+            let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 0, "tabela {table} deveria estar vazia após excluir o cofre");
+        }
+    }
+
+    // Seção 8 do pedido de ajuste ("Exclusão + recriação"): depois de excluir o cofre, criar um
+    // novo (reabrir o schema) precisa restaurar exatamente o baseline padrão do app — mesmo que o
+    // cofre anterior tivesse ordem/logo personalizadas pelo usuário. `wipe_all_tables` já limpa
+    // `platform_seed_state` (ver `wipe_all_tables_removes_every_table`), então `db::init_schema`
+    // reprocessa `PLATFORM_SEEDS` do zero como se fosse uma instalação nova.
+    #[test]
+    fn delete_then_recreate_restores_default_order_even_after_user_customization() {
+        let conn = fixture_conn_with_password("senha-correta-XSS_TEST");
+
+        // Usuário reordena e troca a logo de uma plataforma oficial antes de excluir o cofre.
+        conn.execute(
+            "INSERT INTO images (filename, original_name, hash, created_at) VALUES ('custom.png', 'x.png', 'custom-hash', 'now')",
+            [],
+        )
+        .unwrap();
+        let custom_logo_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE platforms SET sort_order = 999, logo_image_id = ?1 WHERE system_key = 'instagram'",
+            [custom_logo_id],
+        )
+        .unwrap();
+
+        wipe_all_tables(&conn).unwrap();
+        db::init_schema(&conn).unwrap();
+
+        let (sort_order, logo_image_id): (i64, Option<i64>) = conn
+            .query_row("SELECT sort_order, logo_image_id FROM platforms WHERE system_key = 'instagram'", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(sort_order, 0, "Instagram deve voltar ao sort_order padrão (0), não ao 999 personalizado");
+        assert_eq!(logo_image_id, None, "logo personalizada do cofre anterior não pode sobreviver à exclusão");
+
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM platforms", [], |row| row.get(0)).unwrap();
+        assert!(total > 0, "novo cofre deve nascer com as plataformas padrão");
+    }
+
+    // Seção 6 do pedido de ajuste ("Compatibilidade com cofres existentes"): reabrir/inicializar
+    // um cofre que já existe (sem excluir nada) nunca pode resetar ordem ou logo personalizadas —
+    // `provision_default_platforms` pula qualquer `system_key` com `platform_seed_state` já
+    // resolvido, então rodar `init_schema` de novo é inofensivo.
+    #[test]
+    fn reopening_an_existing_vault_preserves_user_customized_order_and_logo() {
+        let conn = fixture_conn_with_password("senha-correta-XSS_TEST");
+
+        conn.execute(
+            "INSERT INTO images (filename, original_name, hash, created_at) VALUES ('custom.png', 'x.png', 'custom-hash', 'now')",
+            [],
+        )
+        .unwrap();
+        let custom_logo_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE platforms SET sort_order = 42, logo_image_id = ?1 WHERE system_key = 'gmail'",
+            [custom_logo_id],
+        )
+        .unwrap();
+
+        // Reabrir o app chama vault_status -> db::init_schema de novo, sem excluir nada antes.
+        db::init_schema(&conn).unwrap();
+
+        let (sort_order, logo_image_id): (i64, Option<i64>) = conn
+            .query_row("SELECT sort_order, logo_image_id FROM platforms WHERE system_key = 'gmail'", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(sort_order, 42, "reabrir o cofre não pode resetar a ordem personalizada");
+        assert_eq!(logo_image_id, Some(custom_logo_id), "reabrir o cofre não pode resetar a logo personalizada");
     }
 }

@@ -335,6 +335,8 @@ function App() {
             }}
             viewMode={settings.viewMode}
             onViewModeChange={settings.setViewMode}
+            listScale={settings.listScale}
+            onListScaleChange={settings.setListScale}
           />
         )}
 
@@ -351,6 +353,8 @@ function App() {
             }}
             viewMode={settings.viewMode}
             onViewModeChange={settings.setViewMode}
+            listScale={settings.listScale}
+            onListScaleChange={settings.setListScale}
           />
         )}
 

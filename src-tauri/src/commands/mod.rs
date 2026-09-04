@@ -3,6 +3,7 @@ pub mod backup;
 pub mod clipboard;
 pub mod history;
 pub mod images;
+pub mod password_generator;
 pub mod platforms;
 pub mod projects;
 pub mod properties;

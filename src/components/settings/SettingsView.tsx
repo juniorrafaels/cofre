@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Database, FolderKanban, Layers, Lock, Monitor, Moon, Palette, Shield, Sun } from "lucide-react";
+import { ArrowLeft, Database, FolderKanban, Layers, Lock, Monitor, Moon, Palette, Shield, Sun, Tag as TagIcon, Wand2 } from "lucide-react";
 import { Button } from "../ui/Button";
 import { Input, Label } from "../ui/Input";
 import { useSettingsStore } from "../../store/useSettingsStore";
@@ -11,6 +11,8 @@ import { SecurityQuestionsSection } from "./SecurityQuestionsSection";
 import { RecoveryKeySection } from "./RecoveryKeySection";
 import { TagsManagerSection } from "./TagsManagerSection";
 import { ListColumnsConfig } from "./ListColumnsConfig";
+import { PasswordGeneratorSection } from "./PasswordGeneratorSection";
+import { DeleteVaultSection } from "./DeleteVaultSection";
 import { PlatformManagerModal } from "../platforms/PlatformManagerModal";
 import { ProjectManagerModal } from "../projects/ProjectManagerModal";
 import { PlatformIcon } from "../ui/PlatformIcon";
@@ -27,6 +29,18 @@ interface Props {
   projects: ProjectWithRelations[];
   tags: Tag[];
 }
+
+type SettingsSection = "security" | "projects" | "platforms" | "appearance" | "tags" | "generator" | "data";
+
+const SECTIONS: { key: SettingsSection; icon: React.ReactNode; title: string; description: string }[] = [
+  { key: "security", icon: <Shield size={18} />, title: "Segurança", description: "Senha, recuperação e proteção do cofre" },
+  { key: "projects", icon: <FolderKanban size={18} />, title: "Projetos", description: "Gerencie e organize seus projetos" },
+  { key: "platforms", icon: <Layers size={18} />, title: "Plataformas", description: "Gerencie e organize suas plataformas" },
+  { key: "appearance", icon: <Palette size={18} />, title: "Aparência", description: "Tema e preferências visuais" },
+  { key: "tags", icon: <TagIcon size={18} />, title: "Tags", description: "Gerencie suas tags" },
+  { key: "generator", icon: <Wand2 size={18} />, title: "Gerador de Senhas", description: "Crie senhas seguras personalizadas" },
+  { key: "data", icon: <Database size={18} />, title: "Dados", description: "Backup, informações e exclusão do cofre" },
+];
 
 function SectionCard({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
   return (
@@ -56,6 +70,7 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
   const lock = useVaultStore((s) => s.lock);
   const push = useToastStore((s) => s.push);
 
+  const [activeSection, setActiveSection] = useState<SettingsSection | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -123,129 +138,230 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
     }
   }
 
+  if (activeSection === null) {
+    return (
+      <div className="mx-auto max-w-2xl p-6">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {SECTIONS.map((section) => (
+            <button
+              key={section.key}
+              onClick={() => setActiveSection(section.key)}
+              className="flex items-start gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-left transition-shadow hover:shadow-md hover:bg-[var(--color-surface-hover)]"
+            >
+              <div className="mt-0.5 text-[var(--color-accent)]">{section.icon}</div>
+              <div>
+                <p className="text-sm font-semibold text-[var(--color-text)]">{section.title}</p>
+                <p className="text-xs text-[var(--color-text-muted)]">{section.description}</p>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-2xl space-y-5 p-6">
-      <SectionCard icon={<Shield size={16} />} title="Segurança">
-        <Row label="Bloquear cofre agora" description="Encerra a sessão desbloqueada imediatamente.">
-          <Button variant="secondary" onClick={() => lock()}>
-            <Lock size={14} /> Bloquear
-          </Button>
-        </Row>
+      <button
+        onClick={() => setActiveSection(null)}
+        className="flex items-center gap-1.5 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+      >
+        <ArrowLeft size={15} /> Configurações
+      </button>
 
-        <Row label="Bloqueio automático" description="Tempo de inatividade até bloquear o cofre.">
-          <select
-            value={settings.autoLockMinutes}
-            onChange={(e) => settings.setAutoLockMinutes(Number(e.target.value))}
-            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm outline-none"
-          >
-            {AUTO_LOCK_OPTIONS.map((m) => (
-              <option key={m} value={m}>
-                {m} min
-              </option>
-            ))}
-          </select>
-        </Row>
+      {activeSection === "security" && (
+        <SectionCard icon={<Shield size={16} />} title="Segurança">
+          <Row label="Bloquear cofre agora" description="Encerra a sessão desbloqueada imediatamente.">
+            <Button variant="secondary" onClick={() => lock()}>
+              <Lock size={14} /> Bloquear
+            </Button>
+          </Row>
 
-        <Row label="Bloquear ao minimizar" description="Bloqueia imediatamente quando a janela é minimizada ou perde visibilidade.">
-          <input
-            type="checkbox"
-            checked={settings.lockOnMinimize}
-            onChange={(e) => settings.setLockOnMinimize(e.target.checked)}
-            className="h-4 w-4"
-          />
-        </Row>
-
-        <Row label="Limpar clipboard automaticamente" description="Apaga a área de transferência após copiar uma senha.">
-          <input
-            type="checkbox"
-            checked={settings.clipboardClearEnabled}
-            onChange={(e) => settings.setClipboardClearEnabled(e.target.checked)}
-            className="h-4 w-4"
-          />
-        </Row>
-
-        {settings.clipboardClearEnabled && (
-          <Row label="Tempo para limpar o clipboard" description="Segundos após a cópia.">
+          <Row label="Bloqueio automático" description="Tempo de inatividade até bloquear o cofre.">
             <select
-              value={settings.clipboardClearSeconds}
-              onChange={(e) => settings.setClipboardClearSeconds(Number(e.target.value))}
+              value={settings.autoLockMinutes}
+              onChange={(e) => settings.setAutoLockMinutes(Number(e.target.value))}
               className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm outline-none"
             >
-              {[10, 20, 30, 60].map((s) => (
-                <option key={s} value={s}>
-                  {s}s
+              {AUTO_LOCK_OPTIONS.map((m) => (
+                <option key={m} value={m}>
+                  {m} min
                 </option>
               ))}
             </select>
           </Row>
-        )}
 
-        <form onSubmit={handleChangePassword} className="space-y-2 border-t border-[var(--color-border)] pt-4">
-          <p className="text-sm font-medium">Alterar senha mestra</p>
-          <div>
-            <Label>Senha atual</Label>
-            <Input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+          <Row label="Bloquear ao minimizar" description="Bloqueia imediatamente quando a janela é minimizada ou perde visibilidade.">
+            <input
+              type="checkbox"
+              checked={settings.lockOnMinimize}
+              onChange={(e) => settings.setLockOnMinimize(e.target.checked)}
+              className="h-4 w-4"
+            />
+          </Row>
+
+          <Row label="Limpar clipboard automaticamente" description="Apaga a área de transferência após copiar uma senha.">
+            <input
+              type="checkbox"
+              checked={settings.clipboardClearEnabled}
+              onChange={(e) => settings.setClipboardClearEnabled(e.target.checked)}
+              className="h-4 w-4"
+            />
+          </Row>
+
+          {settings.clipboardClearEnabled && (
+            <Row label="Tempo para limpar o clipboard" description="Segundos após a cópia.">
+              <select
+                value={settings.clipboardClearSeconds}
+                onChange={(e) => settings.setClipboardClearSeconds(Number(e.target.value))}
+                className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm outline-none"
+              >
+                {[10, 20, 30, 60].map((s) => (
+                  <option key={s} value={s}>
+                    {s}s
+                  </option>
+                ))}
+              </select>
+            </Row>
+          )}
+
+          <form onSubmit={handleChangePassword} className="space-y-2 border-t border-[var(--color-border)] pt-4">
+            <p className="text-sm font-medium">Alterar senha mestra</p>
+            <div>
+              <Label>Senha atual</Label>
+              <Input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+            </div>
+            <div>
+              <Label>Nova senha</Label>
+              <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+            </div>
+            <div>
+              <Label>Confirmar nova senha</Label>
+              <Input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
+            </div>
+            <Button type="submit" variant="primary" disabled={changingPassword || !currentPassword || !newPassword}>
+              {changingPassword ? "Alterando..." : "Alterar senha"}
+            </Button>
+          </form>
+
+          <RecoveryKeySection />
+          <SecurityQuestionsSection />
+        </SectionCard>
+      )}
+
+      {activeSection === "platforms" && (
+        <SectionCard icon={<Layers size={16} />} title="Plataformas">
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Gerencie as plataformas disponíveis para suas contas: crie novas, altere nome, ícone e URLs.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {platforms.slice(0, 8).map((p) => (
+              <span key={p.id} className="flex items-center gap-1.5 rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs">
+                <PlatformIcon icon={p.icon} size={13} /> {p.name}
+              </span>
+            ))}
+            {platforms.length > 8 && (
+              <span className="rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs text-[var(--color-text-muted)]">
+                +{platforms.length - 8}
+              </span>
+            )}
           </div>
-          <div>
-            <Label>Nova senha</Label>
-            <Input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
-          </div>
-          <div>
-            <Label>Confirmar nova senha</Label>
-            <Input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
-          </div>
-          <Button type="submit" variant="primary" disabled={changingPassword || !currentPassword || !newPassword}>
-            {changingPassword ? "Alterando..." : "Alterar senha"}
+          <Button variant="secondary" onClick={() => setPlatformManagerOpen(true)}>
+            Gerenciar plataformas
           </Button>
-        </form>
+        </SectionCard>
+      )}
 
-        <RecoveryKeySection />
-        <SecurityQuestionsSection />
-      </SectionCard>
+      {activeSection === "projects" && (
+        <SectionCard icon={<FolderKanban size={16} />} title="Projetos">
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Visualize os projetos existentes e defina a ordem em que eles aparecem no aplicativo.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {projects.slice(0, 8).map((p) => (
+              <span key={p.id} className="flex items-center gap-1.5 rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs">
+                <Avatar imageId={p.avatar_image_id} size={16} /> {p.name}
+              </span>
+            ))}
+            {projects.length > 8 && (
+              <span className="rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs text-[var(--color-text-muted)]">
+                +{projects.length - 8}
+              </span>
+            )}
+          </div>
+          <Button variant="secondary" onClick={() => setProjectManagerOpen(true)}>
+            Gerenciar projetos
+          </Button>
+        </SectionCard>
+      )}
 
-      <SectionCard icon={<Layers size={16} />} title="Plataformas">
-        <p className="text-xs text-[var(--color-text-muted)]">
-          Gerencie as plataformas disponíveis para suas contas: crie novas, altere nome, ícone e URLs.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          {platforms.slice(0, 8).map((p) => (
-            <span key={p.id} className="flex items-center gap-1.5 rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs">
-              <PlatformIcon icon={p.icon} size={13} /> {p.name}
-            </span>
-          ))}
-          {platforms.length > 8 && (
-            <span className="rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs text-[var(--color-text-muted)]">
-              +{platforms.length - 8}
-            </span>
-          )}
-        </div>
-        <Button variant="secondary" onClick={() => setPlatformManagerOpen(true)}>
-          Gerenciar plataformas
-        </Button>
-      </SectionCard>
+      {activeSection === "tags" && <TagsManagerSection onChanged={onPlatformsChanged} />}
 
-      <SectionCard icon={<FolderKanban size={16} />} title="Projetos">
-        <p className="text-xs text-[var(--color-text-muted)]">
-          Visualize os projetos existentes e defina a ordem em que eles aparecem no aplicativo.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          {projects.slice(0, 8).map((p) => (
-            <span key={p.id} className="flex items-center gap-1.5 rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs">
-              <Avatar imageId={p.avatar_image_id} size={16} /> {p.name}
-            </span>
-          ))}
-          {projects.length > 8 && (
-            <span className="rounded-full bg-[var(--color-surface-hover)] px-2.5 py-1 text-xs text-[var(--color-text-muted)]">
-              +{projects.length - 8}
-            </span>
-          )}
-        </div>
-        <Button variant="secondary" onClick={() => setProjectManagerOpen(true)}>
-          Gerenciar projetos
-        </Button>
-      </SectionCard>
+      {activeSection === "appearance" && (
+        <SectionCard icon={<Palette size={16} />} title="Aparência">
+          <div className="flex gap-2">
+            {(
+              [
+                { key: "light", label: "Claro", icon: <Sun size={14} /> },
+                { key: "dark", label: "Escuro", icon: <Moon size={14} /> },
+                { key: "system", label: "Sistema", icon: <Monitor size={14} /> },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.key}
+                onClick={() => settings.setTheme(opt.key)}
+                className={clsx(
+                  "flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm",
+                  settings.theme === opt.key
+                    ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
+                    : "border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]",
+                )}
+              >
+                {opt.icon} {opt.label}
+              </button>
+            ))}
+          </div>
 
-      <TagsManagerSection onChanged={onPlatformsChanged} />
+          <div className="border-t border-[var(--color-border)] pt-4">
+            <p className="mb-2 text-sm font-medium">Visualização em lista</p>
+            <ListColumnsConfig />
+          </div>
+
+          <p className="border-t border-[var(--color-border)] pt-4 text-xs text-[var(--color-text-muted)]">
+            O tamanho dos itens exibidos nas listas de contas e projetos pode ser ajustado com o controle{" "}
+            <strong>− 100% +</strong>, ao lado do botão de grade/lista, no topo dessas telas.
+          </p>
+        </SectionCard>
+      )}
+
+      {activeSection === "generator" && (
+        <SectionCard icon={<Wand2 size={16} />} title="Gerador de Senhas">
+          <PasswordGeneratorSection />
+        </SectionCard>
+      )}
+
+      {activeSection === "data" && (
+        <SectionCard icon={<Database size={16} />} title="Dados">
+          <div>
+            <Label>Senha do backup</Label>
+            <Input type="password" value={backupPassword} onChange={(e) => setBackupPassword(e.target.value)} placeholder="Senha para proteger o arquivo" />
+          </div>
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={handleExportBackup} className="flex-1">
+              Exportar backup
+            </Button>
+            <Button variant="secondary" onClick={handleImportBackup} className="flex-1">
+              Restaurar backup
+            </Button>
+          </div>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            O backup contém todas as suas contas ainda criptografadas com a senha mestra atual, protegidas por mais uma
+            camada com a senha de backup. Restaurar um backup substitui todos os dados do cofre atual.
+          </p>
+
+          <DeleteVaultSection />
+        </SectionCard>
+      )}
 
       <PlatformManagerModal
         open={platformManagerOpen}
@@ -262,55 +378,6 @@ export function SettingsView({ platforms, countsByPlatform, onPlatformsChanged, 
         tags={tags}
         onChanged={onPlatformsChanged}
       />
-
-      <SectionCard icon={<Palette size={16} />} title="Aparência">
-        <div className="flex gap-2">
-          {(
-            [
-              { key: "light", label: "Claro", icon: <Sun size={14} /> },
-              { key: "dark", label: "Escuro", icon: <Moon size={14} /> },
-              { key: "system", label: "Sistema", icon: <Monitor size={14} /> },
-            ] as const
-          ).map((opt) => (
-            <button
-              key={opt.key}
-              onClick={() => settings.setTheme(opt.key)}
-              className={clsx(
-                "flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm",
-                settings.theme === opt.key
-                  ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                  : "border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]",
-              )}
-            >
-              {opt.icon} {opt.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="border-t border-[var(--color-border)] pt-4">
-          <p className="mb-2 text-sm font-medium">Visualização em lista</p>
-          <ListColumnsConfig />
-        </div>
-      </SectionCard>
-
-      <SectionCard icon={<Database size={16} />} title="Dados">
-        <div>
-          <Label>Senha do backup</Label>
-          <Input type="password" value={backupPassword} onChange={(e) => setBackupPassword(e.target.value)} placeholder="Senha para proteger o arquivo" />
-        </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={handleExportBackup} className="flex-1">
-            Exportar backup
-          </Button>
-          <Button variant="secondary" onClick={handleImportBackup} className="flex-1">
-            Restaurar backup
-          </Button>
-        </div>
-        <p className="text-xs text-[var(--color-text-muted)]">
-          O backup contém todas as suas contas ainda criptografadas com a senha mestra atual, protegidas por mais uma
-          camada com a senha de backup. Restaurar um backup substitui todos os dados do cofre atual.
-        </p>
-      </SectionCard>
     </div>
   );
 }

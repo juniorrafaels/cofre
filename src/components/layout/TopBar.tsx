@@ -1,6 +1,7 @@
 import { LayoutGrid, List, Plus, Search } from "lucide-react";
 import { Button } from "../ui/Button";
-import type { ViewMode } from "../../types";
+import { ScaleControl } from "../ui/ScaleControl";
+import type { ListScale, ViewMode } from "../../types";
 
 interface Props {
   title: string;
@@ -9,6 +10,8 @@ interface Props {
   onAddAccount: () => void;
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
+  listScale: ListScale;
+  onListScaleChange: (scale: ListScale) => void;
   searchPlaceholder?: string;
   addLabel?: string;
 }
@@ -20,6 +23,8 @@ export function TopBar({
   onAddAccount,
   viewMode,
   onViewModeChange,
+  listScale,
+  onListScaleChange,
   searchPlaceholder = "Pesquisar conta...",
   addLabel = "Adicionar conta",
 }: Props) {
@@ -52,6 +57,7 @@ export function TopBar({
             <List size={15} />
           </button>
         </div>
+        <ScaleControl scale={listScale} onChange={onListScaleChange} />
         <Button variant="primary" onClick={onAddAccount}>
           <Plus size={16} /> {addLabel}
         </Button>

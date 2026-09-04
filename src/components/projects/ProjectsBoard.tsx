@@ -4,6 +4,7 @@ import { ProjectCard } from "./ProjectCard";
 import { Avatar } from "../ui/Avatar";
 import { EmptyState } from "../ui/EmptyState";
 import { Button } from "../ui/Button";
+import { useSettingsStore } from "../../store/useSettingsStore";
 
 interface Props {
   projects: ProjectWithRelations[];
@@ -14,6 +15,8 @@ interface Props {
 }
 
 export function ProjectsBoard({ projects, viewMode, onOpen, onToggleFavorite, onAddProject }: Props) {
+  const listScale = useSettingsStore((s) => s.listScale);
+
   if (projects.length === 0) {
     return (
       <EmptyState
@@ -30,7 +33,7 @@ export function ProjectsBoard({ projects, viewMode, onOpen, onToggleFavorite, on
 
   if (viewMode === "list") {
     return (
-      <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <div className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]" style={{ zoom: listScale / 100 }}>
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--color-border)] text-left text-xs text-[var(--color-text-muted)]">
@@ -75,7 +78,7 @@ export function ProjectsBoard({ projects, viewMode, onOpen, onToggleFavorite, on
   }
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" style={{ zoom: listScale / 100 }}>
       {projects.map((project) => (
         <ProjectCard key={project.id} project={project} onOpen={() => onOpen(project)} onToggleFavorite={() => onToggleFavorite(project)} />
       ))}

@@ -170,8 +170,10 @@ CREATE INDEX IF NOT EXISTS idx_account_history_account ON account_history(accoun
 /// tem logo próprio.
 ///
 /// Esta lista reflete exatamente as plataformas e imagens que já existiam cadastradas na
-/// instalação de desenvolvimento em 2026-08-29 (ver relatório da tarefa) — não foram inventadas
-/// novas categorias. A ORDEM do array é a ordem de `sort_order` para uma instalação nova.
+/// instalação de desenvolvimento (ver relatório da tarefa) — não foram inventadas novas
+/// categorias. A ORDEM do array é a ordem de `sort_order` para uma instalação nova, e foi
+/// atualizada em 2026-09-04 para refletir a ordem manual final configurada nessa instalação
+/// (Outros por último, depois de todas as plataformas com logo).
 struct PlatformSeed {
     system_key: &'static str,
     name: &'static str,
@@ -189,14 +191,6 @@ const PLATFORM_SEEDS: &[PlatformSeed] = &[
         login_url: "https://www.instagram.com/accounts/login/",
         website_url: "https://www.instagram.com",
         logo_resource: Some("instagram.png"),
-    },
-    PlatformSeed {
-        system_key: "outros",
-        name: "Outros",
-        icon: "🌐",
-        login_url: "",
-        website_url: "",
-        logo_resource: None,
     },
     PlatformSeed {
         system_key: "gmail",
@@ -333,6 +327,14 @@ const PLATFORM_SEEDS: &[PlatformSeed] = &[
         login_url: "https://nostr.com/",
         website_url: "https://nostr.com/",
         logo_resource: Some("nostr.png"),
+    },
+    PlatformSeed {
+        system_key: "outros",
+        name: "Outros",
+        icon: "🌐",
+        login_url: "",
+        website_url: "",
+        logo_resource: None,
     },
 ];
 
@@ -493,13 +495,13 @@ pub fn mark_platform_seed_removed(conn: &Connection, system_key: &str) -> Result
     upsert_seed_state(conn, system_key, "removed")
 }
 
-/// Copia, para cada plataforma oficial marcada como `provisioned_pending_image`, o asset padrão
-/// correspondente (`resources/default-platform-images/<arquivo>`) para dentro da biblioteca de
-/// imagens desta instalação (`images` + `$APPDATA/images`) — exatamente o mesmo mecanismo usado
-/// para uma imagem importada manualmente (`import_image`/`create_image_record`), só que a origem
-/// é um resource empacotado com o app em vez de um arquivo escolhido pelo usuário. Depois disso a
-/// plataforma nunca mais depende do arquivo em `resources/`: a cópia em `$APPDATA/images` é quem
-/// o frontend lê (`resolveImageSrc`), da mesma forma que qualquer outra imagem da biblioteca.
+/// Copia, para cada plataforma oficial que precise, o asset padrão correspondente
+/// (`resources/default-platform-images/<arquivo>`) para dentro da biblioteca de imagens desta
+/// instalação (`images` + `$APPDATA/images`) — exatamente o mesmo mecanismo usado para uma imagem
+/// importada manualmente (`import_image`/`create_image_record`), só que a origem é um resource
+/// empacotado com o app em vez de um arquivo escolhido pelo usuário. Depois disso a plataforma
+/// nunca mais depende do arquivo em `resources/`: a cópia em `$APPDATA/images` é quem o frontend
+/// lê (`resolveImageSrc`), da mesma forma que qualquer outra imagem da biblioteca.
 ///
 /// Precisa de `AppHandle` (para resolver o diretório de resources e o AppData), por isso não é
 /// chamada pelos testes de schema puro — só pelos comandos que já rodam dentro do app de verdade
@@ -518,33 +520,83 @@ pub fn provision_default_platform_images(app: &AppHandle, conn: &Connection) -> 
     provision_default_platform_images_at(&resource_root, &images_dir, conn)
 }
 
+/// Roda em toda inicialização (não só quando `platform_seed_state` está `provisioned_pending_image`):
+/// um bug real em produção (executável portátil de `npm run release` copiado sem a pasta
+/// `resources/` ao lado — corrigido em `scripts/release.mjs`) fez `fs::read` falhar
+/// silenciosamente para todo asset, deixando `$APPDATA/images` vazio mesmo depois de recriar o
+/// cofre. Duas garantias novas evitam que isso volte a passar despercebido ou fique quebrado para
+/// sempre:
+///
+/// 1. **Nunca marca `provisioned` sem confirmar que o arquivo físico existe** — mesmo reaproveitando
+///    uma linha de `images` já existente pelo hash, o arquivo em `$APPDATA/images` é conferido (e
+///    reescrito se sumiu) antes de considerar a plataforma resolvida. Se o arquivo ainda assim não
+///    existir depois de tentar escrever (disco cheio, permissão), a plataforma continua pendente e
+///    a próxima inicialização tenta de novo — nunca fica presa em "concluído" com um arquivo que
+///    não existe.
+/// 2. **Repara plataformas já `provisioned`** cujo arquivo sumiu por fora do fluxo normal (ex.:
+///    antivírus, limpeza manual de `$APPDATA/images`) — mas só quando a imagem vinculada ainda é,
+///    pelo hash, exatamente o resource padrão atual. Se o hash for diferente (usuário trocou a
+///    logo de propósito), nunca mexe, mesmo que o arquivo dessa logo personalizada também esteja
+///    ausente — isso é um problema do usuário com a própria imagem, não do provisionamento padrão.
 fn provision_default_platform_images_at(resource_root: &Path, images_dir: &Path, conn: &Connection) -> Result<(), String> {
-    let pending: Vec<String> = {
-        let mut stmt = conn
-            .prepare("SELECT system_key FROM platform_seed_state WHERE status = 'provisioned_pending_image'")
-            .map_err(|e| e.to_string())?;
-        let mapped = stmt.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-        mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
-    };
+    for seed in PLATFORM_SEEDS {
+        let Some(resource_name) = seed.logo_resource else { continue };
 
-    for system_key in pending {
-        let Some(seed) = PLATFORM_SEEDS.iter().find(|s| s.system_key == system_key) else { continue };
-        let Some(resource_name) = seed.logo_resource else {
-            upsert_seed_state(conn, &system_key, "provisioned")?;
+        let status: Option<String> = conn
+            .query_row("SELECT status FROM platform_seed_state WHERE system_key = ?1", [seed.system_key], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        // "removed": o usuário excluiu essa plataforma oficial de propósito (seção 18 do pedido
+        // de ajuste original) — não existe linha em `platforms` para recriar nem imagem para
+        // provisionar.
+        if status.as_deref() == Some("removed") {
             continue;
-        };
+        }
+
+        let platform: Option<(i64, Option<i64>)> = conn
+            .query_row("SELECT id, logo_image_id FROM platforms WHERE system_key = ?1", [seed.system_key], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        // Linha ainda não existe (ex.: `provision_default_platforms` ainda não rodou nesta
+        // conexão) — nada a fazer aqui ainda.
+        let Some((_, current_logo_image_id)) = platform else { continue };
 
         let resource_path = resource_root.join(resource_name);
         let bytes = match fs::read(&resource_path) {
             Ok(b) => b,
-            // Asset ausente/ilegível (não deveria acontecer em uma build correta): não falha a
-            // inicialização do app inteiro, só tenta de novo na próxima vez.
+            // Asset ausente/ilegível nesta build (ex.: `resources/` não foi copiado para o local
+            // certo — ver doc acima): não falha a inicialização do app inteiro, só tenta de novo
+            // na próxima vez. Nunca marca como concluído a partir daqui.
             Err(_) => continue,
         };
 
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         let hash = format!("{:x}", hasher.finalize());
+
+        let pending = status.as_deref() == Some("provisioned_pending_image");
+        if !pending {
+            let needs_repair = match current_logo_image_id {
+                None => true,
+                Some(image_id) => {
+                    let linked: Option<(String, String)> = conn
+                        .query_row("SELECT filename, hash FROM images WHERE id = ?1", [image_id], |row| {
+                            Ok((row.get(0)?, row.get(1)?))
+                        })
+                        .optional()
+                        .map_err(|e| e.to_string())?;
+                    match linked {
+                        None => true, // logo_image_id órfão (a linha de `images` sumiu)
+                        Some((filename, linked_hash)) => linked_hash == hash && !images_dir.join(&filename).exists(),
+                    }
+                }
+            };
+            if !needs_repair {
+                continue;
+            }
+        }
 
         let existing_image_id: Option<i64> = conn
             .query_row("SELECT id FROM images WHERE hash = ?1", [&hash], |row| row.get(0))
@@ -556,11 +608,6 @@ fn provision_default_platform_images_at(resource_root: &Path, images_dir: &Path,
             None => {
                 let extension = Path::new(resource_name).extension().and_then(|e| e.to_str()).unwrap_or("png");
                 let filename = format!("{hash}.{extension}");
-                fs::create_dir_all(images_dir).map_err(|e| e.to_string())?;
-                let target = images_dir.join(&filename);
-                if !target.exists() {
-                    fs::write(&target, &bytes).map_err(|e| e.to_string())?;
-                }
                 conn.execute(
                     "INSERT INTO images (filename, original_name, hash, created_at) VALUES (?1, NULL, ?2, ?3)",
                     rusqlite::params![filename, hash, now_iso()],
@@ -570,12 +617,28 @@ fn provision_default_platform_images_at(resource_root: &Path, images_dir: &Path,
             }
         };
 
+        // Reaproveitar uma linha de `images` pelo hash não significa que o arquivo físico
+        // sobreviveu (ex.: cenário de reparo acima) — sempre confere/reescreve antes de marcar
+        // como concluído.
+        let filename: String =
+            conn.query_row("SELECT filename FROM images WHERE id = ?1", [image_id], |row| row.get(0)).map_err(|e| e.to_string())?;
+        fs::create_dir_all(images_dir).map_err(|e| e.to_string())?;
+        let target = images_dir.join(&filename);
+        if !target.exists() {
+            fs::write(&target, &bytes).map_err(|e| e.to_string())?;
+        }
+        if !target.exists() {
+            // Escrita não pegou por algum motivo (ex.: permissão) — não marca como concluído,
+            // tenta de novo na próxima inicialização.
+            continue;
+        }
+
         conn.execute(
             "UPDATE platforms SET logo_image_id = ?1 WHERE system_key = ?2 AND logo_image_id IS NULL",
-            rusqlite::params![image_id, system_key],
+            rusqlite::params![image_id, seed.system_key],
         )
         .map_err(|e| e.to_string())?;
-        upsert_seed_state(conn, &system_key, "provisioned")?;
+        upsert_seed_state(conn, seed.system_key, "provisioned")?;
     }
     Ok(())
 }
@@ -672,6 +735,23 @@ mod tests {
         init_schema(&conn).unwrap();
         let count_again: i64 = conn.query_row("SELECT COUNT(*) FROM platforms", [], |row| row.get(0)).unwrap();
         assert_eq!(count_again, PLATFORM_SEEDS.len() as i64);
+    }
+
+    // Seção 5 do pedido de ajuste: a ordem padrão precisa ser declarada explicitamente (não
+    // `ORDER BY name ASC`) e reproduzir exatamente a ordem de `PLATFORM_SEEDS` — inclusive
+    // "Outros" por último, e não logo depois do Instagram.
+    #[test]
+    fn fresh_install_sort_order_matches_platform_seeds_array_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let mut stmt = conn.prepare("SELECT system_key FROM platforms ORDER BY sort_order ASC").unwrap();
+        let ordered_keys: Vec<String> =
+            stmt.query_map([], |row| row.get::<_, Option<String>>(0)).unwrap().map(|r| r.unwrap().unwrap()).collect();
+
+        let expected: Vec<&str> = PLATFORM_SEEDS.iter().map(|s| s.system_key).collect();
+        assert_eq!(ordered_keys, expected);
+        assert_eq!(ordered_keys.last().map(String::as_str), Some("outros"), "Outros deve ficar por último");
     }
 
     // Seção 2/11: um banco pré-existente (como o de desenvolvimento) que já tinha essas
@@ -860,6 +940,168 @@ mod tests {
         let (_, _, instagram_logo, _) = platform_row(&conn, "instagram").unwrap();
         let (_, _, gmail_logo, _) = platform_row(&conn, "gmail").unwrap();
         assert_eq!(instagram_logo, gmail_logo);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn real_resource_root() -> PathBuf {
+        // `CARGO_MANIFEST_DIR` é a pasta `src-tauri` (onde está o `Cargo.toml` deste crate) — o
+        // mesmo `resources/default-platform-images` que o Tauri empacota de verdade, não uma
+        // fixture fabricada com bytes falsos como os testes acima. Isso é o que expôs o bug real
+        // relatado em produção: os testes anteriores só validavam banco/metadata, nunca se os 18
+        // arquivos de verdade existem e são copiados fisicamente.
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/default-platform-images")
+    }
+
+    // Seção 7 do pedido de correção do bug: prova, com os arquivos REAIS do projeto (não bytes
+    // fabricados), que uma instalação nova copia fisicamente todas as imagens padrão esperadas, e
+    // que cada plataforma fica apontando para um arquivo que realmente existe em disco.
+    #[test]
+    fn fresh_install_physically_copies_every_real_default_image() {
+        let resource_root = real_resource_root();
+        assert!(resource_root.is_dir(), "resources/default-platform-images precisa existir no projeto: {resource_root:?}");
+
+        let tmp = std::env::temp_dir().join(format!("cofre_test_real_resources_{}", std::process::id()));
+        let images_dir = tmp.join("appdata_images");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        provision_default_platform_images_at(&resource_root, &images_dir, &conn).unwrap();
+
+        let expected_with_logo = PLATFORM_SEEDS.iter().filter(|s| s.logo_resource.is_some()).count();
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.system_key, i.filename FROM platforms p JOIN images i ON p.logo_image_id = i.id WHERE p.system_key IS NOT NULL",
+            )
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().map(|r| r.unwrap()).collect();
+
+        assert_eq!(rows.len(), expected_with_logo, "toda plataforma oficial com logo_resource deveria ter uma imagem vinculada");
+        for (system_key, filename) in &rows {
+            let path = images_dir.join(filename);
+            assert!(path.exists(), "imagem física ausente para '{system_key}' em {path:?}");
+            assert!(std::fs::metadata(&path).unwrap().len() > 0, "arquivo copiado para '{system_key}' está vazio");
+            assert_eq!(seed_status(&conn, system_key).as_deref(), Some("provisioned"));
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Seção 7/8: reproduz exatamente o cenário relatado — excluir o cofre (que apaga
+    // `platform_seed_state`/`platforms` e a pasta `images` inteira) e criar outro precisa
+    // reconstruir a biblioteca física do zero a partir dos MESMOS resources reais, sem depender
+    // de nada que sobrou do cofre anterior.
+    #[test]
+    fn delete_then_recreate_restores_every_real_default_image_on_disk() {
+        let resource_root = real_resource_root();
+        let tmp = std::env::temp_dir().join(format!("cofre_test_real_resources_recreate_{}", std::process::id()));
+        let images_dir = tmp.join("appdata_images");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        provision_default_platform_images_at(&resource_root, &images_dir, &conn).unwrap();
+
+        let expected_with_logo = PLATFORM_SEEDS.iter().filter(|s| s.logo_resource.is_some()).count();
+        let count_images_dir = |dir: &Path| std::fs::read_dir(dir).map(|it| it.count()).unwrap_or(0);
+        assert_eq!(count_images_dir(&images_dir), expected_with_logo, "biblioteca inicial deveria ter um arquivo por plataforma com logo");
+
+        // Exclusão do cofre (`wipe_all_tables` + `remove_dir_all("images")`): apaga tudo que é
+        // dado do cofre, sem tocar nos resources empacotados com o app.
+        std::fs::remove_dir_all(&images_dir).unwrap();
+        conn.execute_batch("DELETE FROM platform_seed_state; DELETE FROM platforms;").unwrap();
+        assert_eq!(count_images_dir(&images_dir), 0);
+
+        // Novo cofre: `init_schema` recria as linhas de `platforms` (via `provision_default_platforms`),
+        // e o provisionamento de imagens reconstrói a biblioteca física do zero.
+        init_schema(&conn).unwrap();
+        provision_default_platform_images_at(&resource_root, &images_dir, &conn).unwrap();
+
+        assert_eq!(count_images_dir(&images_dir), expected_with_logo, "biblioteca deveria ser reconstruída por completo após excluir + recriar");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.system_key, i.filename FROM platforms p JOIN images i ON p.logo_image_id = i.id WHERE p.system_key IS NOT NULL",
+            )
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(rows.len(), expected_with_logo);
+        for (system_key, filename) in &rows {
+            assert!(images_dir.join(filename).exists(), "imagem física não foi recriada para '{system_key}' após excluir + recriar o cofre");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Seção 5/6 do pedido de correção do bug: se o arquivo físico de uma logo padrão sumir por
+    // fora do fluxo normal (ex.: antivírus, limpeza manual de `$APPDATA/images`) enquanto
+    // `platform_seed_state` ainda diz "provisioned", a próxima inicialização precisa reparar
+    // sozinha — mas só porque o hash da imagem vinculada ainda bate com o resource atual.
+    #[test]
+    fn repairs_missing_physical_file_when_platform_still_uses_the_default_logo() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        let tmp = std::env::temp_dir().join(format!("cofre_test_repair_{}", std::process::id()));
+        let resource_root = tmp.join("resources");
+        let images_dir = tmp.join("appdata_images");
+        write_temp_png(&resource_root, "instagram.png", b"official-instagram-bytes");
+
+        provision_default_platform_images_at(&resource_root, &images_dir, &conn).unwrap();
+        let (_, _, logo_id, _) = platform_row(&conn, "instagram").unwrap();
+        let logo_id = logo_id.unwrap();
+        let filename: String = conn.query_row("SELECT filename FROM images WHERE id = ?1", [logo_id], |row| row.get(0)).unwrap();
+        let copied_path = images_dir.join(&filename);
+        assert!(copied_path.exists());
+
+        // Simula o arquivo sumindo por fora do fluxo normal, sem passar por `delete_vault`.
+        std::fs::remove_file(&copied_path).unwrap();
+        assert!(!copied_path.exists());
+        assert_eq!(seed_status(&conn, "instagram").as_deref(), Some("provisioned"), "estado continua 'provisioned' mesmo com o arquivo sumido");
+
+        provision_default_platform_images_at(&resource_root, &images_dir, &conn).unwrap();
+
+        assert!(copied_path.exists(), "arquivo padrão deveria ter sido restaurado automaticamente");
+        let (_, _, logo_id_after, _) = platform_row(&conn, "instagram").unwrap();
+        assert_eq!(logo_id_after, Some(logo_id), "reparo não deveria trocar qual linha de `images` a plataforma usa");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Continuação do teste acima: se o usuário trocou a logo por uma personalizada e o ARQUIVO
+    // DELA sumiu, isso não pode ser "reparado" com o resource padrão — não é problema do
+    // provisionamento padrão, e sobrescrever seria perder a escolha do usuário silenciosamente.
+    #[test]
+    fn does_not_repair_a_missing_file_for_a_customized_logo() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO images (filename, original_name, hash, created_at) VALUES ('custom.png', 'x.png', 'custom-logo-hash', 'now')",
+            [],
+        )
+        .unwrap();
+        let user_logo_id = conn.last_insert_rowid();
+        conn.execute("UPDATE platforms SET logo_image_id = ?1 WHERE system_key = 'instagram'", [user_logo_id]).unwrap();
+        upsert_seed_state(&conn, "instagram", "provisioned").unwrap();
+
+        let tmp = std::env::temp_dir().join(format!("cofre_test_no_repair_{}", std::process::id()));
+        let resource_root = tmp.join("resources");
+        let images_dir = tmp.join("appdata_images");
+        write_temp_png(&resource_root, "instagram.png", b"official-instagram-bytes");
+        // A imagem personalizada do usuário nunca existiu fisicamente aqui neste teste (simula o
+        // arquivo dela já estar ausente) — o ponto é que isso não deve importar para o
+        // provisionamento padrão.
+
+        provision_default_platform_images_at(&resource_root, &images_dir, &conn).unwrap();
+
+        let (_, _, logo_id, _) = platform_row(&conn, "instagram").unwrap();
+        assert_eq!(logo_id, Some(user_logo_id), "logo personalizada não pode ser trocada mesmo com o arquivo dela ausente");
+        assert!(
+            !images_dir.join("custom.png").exists(),
+            "provisionamento padrão não deve criar/tocar no arquivo de uma logo personalizada"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

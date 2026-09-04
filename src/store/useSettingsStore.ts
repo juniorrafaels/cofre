@@ -1,6 +1,14 @@
 import { create } from "zustand";
 import { getAllSettings, setSetting } from "../lib/db";
-import { DEFAULT_LIST_COLUMNS, type AppSettings, type ListColumnKey, type ThemePreference, type ViewMode } from "../types";
+import {
+  DEFAULT_LIST_COLUMNS,
+  LIST_SCALE_LEVELS,
+  type AppSettings,
+  type ListColumnKey,
+  type ListScale,
+  type ThemePreference,
+  type ViewMode,
+} from "../types";
 
 const DEFAULTS: AppSettings = {
   theme: "system",
@@ -10,6 +18,7 @@ const DEFAULTS: AppSettings = {
   clipboardClearSeconds: 20,
   viewMode: "grid",
   listColumns: DEFAULT_LIST_COLUMNS,
+  listScale: 100,
 };
 
 interface SettingsStore extends AppSettings {
@@ -22,6 +31,7 @@ interface SettingsStore extends AppSettings {
   setClipboardClearSeconds: (seconds: number) => Promise<void>;
   setViewMode: (mode: ViewMode) => Promise<void>;
   setListColumns: (columns: ListColumnKey[]) => Promise<void>;
+  setListScale: (scale: ListScale) => Promise<void>;
 }
 
 function applyTheme(theme: ThemePreference) {
@@ -52,6 +62,9 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
       clipboardClearSeconds: raw.clipboard_clear_seconds ? Number(raw.clipboard_clear_seconds) : DEFAULTS.clipboardClearSeconds,
       viewMode: raw.view_mode === "list" ? "list" : DEFAULTS.viewMode,
       listColumns,
+      listScale: (LIST_SCALE_LEVELS as readonly number[]).includes(Number(raw.list_scale))
+        ? (Number(raw.list_scale) as ListScale)
+        : DEFAULTS.listScale,
     };
     applyTheme(next.theme);
     set({ ...next, loaded: true });
@@ -84,6 +97,10 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   setListColumns: async (columns) => {
     await setSetting("list_columns", JSON.stringify(columns));
     set({ listColumns: columns });
+  },
+  setListScale: async (scale) => {
+    await setSetting("list_scale", String(scale));
+    set({ listScale: scale });
   },
 }));
 

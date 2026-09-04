@@ -28,6 +28,7 @@ export function AccountsBoard({
   onAddAccount,
 }: Props) {
   const listColumns = useSettingsStore((s) => s.listColumns);
+  const listScale = useSettingsStore((s) => s.listScale);
 
   if (accounts.length === 0) {
     return (
@@ -45,12 +46,14 @@ export function AccountsBoard({
 
   if (viewMode === "list") {
     return (
-      <AccountsListView accounts={accounts} columns={listColumns} onOpenDetail={onOpenDetail} onEdit={onEdit} onToggleFavorite={onToggleFavorite} />
+      <div style={{ zoom: listScale / 100 }}>
+        <AccountsListView accounts={accounts} columns={listColumns} onOpenDetail={onOpenDetail} onEdit={onEdit} onToggleFavorite={onToggleFavorite} />
+      </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" style={{ zoom: listScale / 100 }}>
       {accounts.map((account) => (
         <AccountCard
           key={account.id}

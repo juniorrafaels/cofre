@@ -12,9 +12,12 @@ dist
 dist-ssr
 *.local
 
-# Executável permanente gerado por "npm run release" (não deve ser versionado)
+# Executável permanente gerado por "npm run release" (não deve ser versionado), e os resources
+# (ex.: imagens padrão das plataformas) que o script copia ao lado dele para que o .exe portátil
+# encontre os mesmos assets que já estão versionados em src-tauri/resources/
 /Cofre de Contas.exe
 /.Cofre de Contas.exe.tmp
+/resources
 
 # Editor directories and files
 .vscode/*

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl as openUrlPlugin } from "@tauri-apps/plugin-opener";
-import type { RecoveryOutcome, RecoveryQuestion, SecurityQuestionsSummary } from "../types";
+import type { PasswordGeneratorOptions, RecoveryOutcome, RecoveryQuestion, SecurityQuestionsSummary } from "../types";
 
 const ALLOWED_URL_SCHEMES = new Set(["http:", "https:"]);
 
@@ -16,6 +16,13 @@ export const vaultCommands = {
   lock: () => invoke<void>("lock_vault"),
   changeMasterPassword: (currentPassword: string, newPassword: string) =>
     invoke<void>("change_master_password", { currentPassword, newPassword }),
+  // Etapa 1 da exclusão do cofre: confere a senha mestra atual sem alterar nada — reaproveita a
+  // mesma verificação real usada por change_master_password/Recovery Key/perguntas de segurança.
+  verifyMasterPassword: (password: string) => invoke<void>("verify_master_password", { password }),
+  // Etapa 2 já foi confirmada pela UI (usuário digitou "EXCLUIR") antes de chamar isto. O Rust
+  // reautentica a senha mestra de novo aqui mesmo, então uma chamada direta sem a UI não
+  // consegue pular a verificação.
+  deleteVault: (password: string) => invoke<void>("delete_vault", { password }),
 };
 
 // Fase 4 (SECURITY_AUDIT_PHASE_4.md): não existe mais `encrypt_secret`/`decrypt_secret` — nenhum
@@ -110,4 +117,11 @@ export const recoveryKeyCommands = {
   generate: (currentPassword: string) => invoke<string>("generate_recovery_key", { currentPassword }),
   disable: (currentPassword: string) => invoke<void>("disable_recovery_key", { currentPassword }),
   unlockWithKey: (recoveryKey: string) => invoke<void>("unlock_with_recovery_key", { recoveryKey }),
+};
+
+// Gerador de senhas (Configurações → Gerador de Senhas): a geração roda inteiramente no backend
+// com o CSPRNG do SO (ver src-tauri/src/commands/password_generator.rs) — o frontend nunca usa
+// Math.random() nem gera nada localmente, e a senha resultante não é salva em nenhum lugar aqui.
+export const passwordGeneratorCommands = {
+  generate: (options: PasswordGeneratorOptions) => invoke<string>("generate_password", { options }),
 };

@@ -11,6 +11,9 @@ const BOOL_VALUES: &[&str] = &["true", "false"];
 const VIEW_MODE_VALUES: &[&str] = &["grid", "list"];
 const LIST_COLUMN_KEYS: &[&str] =
     &["avatar", "name", "platform", "username", "email", "project", "status", "tags", "updated_at", "two_factor"];
+// Níveis discretos do controle de escala das listagens/cards (seção 4 do pedido de ajuste) —
+// nunca zoom livre, para não permitir um valor que quebre o layout.
+const LIST_SCALE_VALUES: &[&str] = &["75", "90", "100", "110", "125", "150", "175", "200"];
 
 fn require_unlocked(state: &State<VaultState>) -> Result<(), String> {
     if !state.is_unlocked() {
@@ -48,6 +51,11 @@ fn validate_setting(key: &str, value: &str) -> Result<(), String> {
         "view_mode" => {
             if !VIEW_MODE_VALUES.contains(&value) {
                 return Err("Modo de visualização inválido.".to_string());
+            }
+        }
+        "list_scale" => {
+            if !LIST_SCALE_VALUES.contains(&value) {
+                return Err("Escala de visualização inválida.".to_string());
             }
         }
         "list_columns" => {
@@ -117,5 +125,17 @@ mod tests {
     fn rejects_non_boolean_values_for_boolean_settings() {
         assert!(validate_setting("lock_on_minimize", "maybe").is_err());
         assert!(validate_setting("lock_on_minimize", "true").is_ok());
+    }
+
+    #[test]
+    fn rejects_list_scale_values_outside_the_discrete_levels() {
+        assert!(validate_setting("list_scale", "60").is_err());
+        assert!(validate_setting("list_scale", "140").is_err());
+        assert!(validate_setting("list_scale", "201").is_err());
+        assert!(validate_setting("list_scale", "100").is_ok());
+        assert!(validate_setting("list_scale", "125").is_ok());
+        assert!(validate_setting("list_scale", "150").is_ok());
+        assert!(validate_setting("list_scale", "175").is_ok());
+        assert!(validate_setting("list_scale", "200").is_ok());
     }
 }
