@@ -220,7 +220,7 @@ pub fn list_accounts_with_relations(app: AppHandle, state: State<VaultState>, sc
 
     let sql = format!(
         "SELECT {ACCOUNT_COLUMNS}, \
-                p.name, p.icon, p.login_url, p.website_url, p.is_custom, p.logo_image_id, p.created_at, p.sort_order \
+                p.name, p.icon, p.login_url, p.website_url, p.is_custom, p.logo_image_id, p.created_at, p.sort_order, p.system_key \
          FROM accounts a \
          LEFT JOIN platforms p ON p.id = a.platform_id \
          {where_clause} \
@@ -241,6 +241,7 @@ pub fn list_accounts_with_relations(app: AppHandle, state: State<VaultState>, sc
                     logo_image_id: row.get(22)?,
                     created_at: row.get::<_, Option<String>>(23)?.unwrap_or_default(),
                     sort_order: row.get::<_, Option<i64>>(24)?.unwrap_or(0),
+                    system_key: row.get(25)?,
                 })
             } else {
                 None

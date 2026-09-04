@@ -268,23 +268,31 @@ fn register_failed_attempt(conn: &rusqlite::Connection, failed_count: i64) -> Re
     Ok(())
 }
 
-#[tauri::command]
-pub fn attempt_vault_recovery(
-    app: AppHandle,
-    state: State<VaultState>,
-    answers: Vec<RecoveryAnswer>,
-) -> Result<RecoveryOutcome, String> {
-    let conn = db::open(&app)?;
+/// Resultado interno de uma tentativa de recuperação: separa a mensagem pública (`outcome`, o
+/// que a WebView recebe) da DEK reconstruída (`dek`, que só o comando `#[tauri::command]` usa
+/// para chamar `state.set_dek`). Extraído como função pura sobre `&Connection` (mesmo padrão já
+/// usado por `verify_current_password`/`build_backup_payload`) para permitir testes automatizados
+/// de todo o fluxo de recuperação por perguntas — incluindo o rate limiting de tentativas — sem
+/// precisar de um `AppHandle`/`State` reais (ver seção "Recovery Key"/"Security Questions" do
+/// pedido de validação final).
+struct RecoveryAttemptResult {
+    outcome: RecoveryOutcome,
+    dek: Option<[u8; 32]>,
+}
 
-    let (failed_count, locked_until) = recovery_lock_status(&conn)?;
+fn attempt_recovery_core(conn: &rusqlite::Connection, answers: &[RecoveryAnswer]) -> Result<RecoveryAttemptResult, String> {
+    let (failed_count, locked_until) = recovery_lock_status(conn)?;
     if let Some(locked_until) = locked_until {
         if let Ok(locked_at) = chrono::DateTime::parse_from_rfc3339(&locked_until) {
             let remaining = locked_at.with_timezone(&chrono::Utc) - chrono::Utc::now();
             if remaining.num_seconds() > 0 {
                 let minutes = (remaining.num_seconds() as f64 / 60.0).ceil() as i64;
-                return Ok(RecoveryOutcome {
-                    success: false,
-                    message: format!("Muitas tentativas incorretas. Tente novamente em {minutes} minuto(s)."),
+                return Ok(RecoveryAttemptResult {
+                    outcome: RecoveryOutcome {
+                        success: false,
+                        message: format!("Muitas tentativas incorretas. Tente novamente em {minutes} minuto(s)."),
+                    },
+                    dek: None,
                 });
             }
             conn.execute("UPDATE recovery_attempts SET locked_until = NULL WHERE id = 1", [])
@@ -293,7 +301,7 @@ pub fn attempt_vault_recovery(
     }
 
     let mut collected_shares: Vec<Share> = Vec::new();
-    for answer in &answers {
+    for answer in answers {
         let row: Option<(Vec<u8>, String, Vec<u8>)> = conn
             .query_row(
                 "SELECT answer_salt, kdf_params, wrapped_share FROM security_questions WHERE id = ?1",
@@ -312,10 +320,13 @@ pub fn attempt_vault_recovery(
     }
 
     if collected_shares.len() < RECOVERY_THRESHOLD as usize {
-        register_failed_attempt(&conn, failed_count)?;
-        return Ok(RecoveryOutcome {
-            success: false,
-            message: "Respostas insuficientes ou incorretas. Verifique e tente novamente.".to_string(),
+        register_failed_attempt(conn, failed_count)?;
+        return Ok(RecoveryAttemptResult {
+            outcome: RecoveryOutcome {
+                success: false,
+                message: "Respostas insuficientes ou incorretas. Verifique e tente novamente.".to_string(),
+            },
+            dek: None,
         });
     }
 
@@ -325,10 +336,13 @@ pub fn attempt_vault_recovery(
     let dek_bytes = match recovered {
         Ok(bytes) if bytes.len() == 32 => bytes,
         _ => {
-            register_failed_attempt(&conn, failed_count)?;
-            return Ok(RecoveryOutcome {
-                success: false,
-                message: "Respostas insuficientes ou incorretas. Verifique e tente novamente.".to_string(),
+            register_failed_attempt(conn, failed_count)?;
+            return Ok(RecoveryAttemptResult {
+                outcome: RecoveryOutcome {
+                    success: false,
+                    message: "Respostas insuficientes ou incorretas. Verifique e tente novamente.".to_string(),
+                },
+                dek: None,
             });
         }
     };
@@ -339,11 +353,14 @@ pub fn attempt_vault_recovery(
         .query_row("SELECT dek_check FROM vault_meta WHERE id = 1", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
     if let Some(check) = dek_check {
-        if crypto::decrypt(&dek, &check).map(|p| p.as_slice() == DEK_CHECK_PLAINTEXT).unwrap_or(false) == false {
-            register_failed_attempt(&conn, failed_count)?;
-            return Ok(RecoveryOutcome {
-                success: false,
-                message: "Respostas insuficientes ou incorretas. Verifique e tente novamente.".to_string(),
+        if !crypto::decrypt(&dek, &check).map(|p| p.as_slice() == DEK_CHECK_PLAINTEXT).unwrap_or(false) {
+            register_failed_attempt(conn, failed_count)?;
+            return Ok(RecoveryAttemptResult {
+                outcome: RecoveryOutcome {
+                    success: false,
+                    message: "Respostas insuficientes ou incorretas. Verifique e tente novamente.".to_string(),
+                },
+                dek: None,
             });
         }
     }
@@ -353,11 +370,22 @@ pub fn attempt_vault_recovery(
 
     // Auto-cura (Fase 2): a DEK também pode ser obtida por este caminho (sem nunca passar por
     // `unlock_vault`), então a migração precisa rodar aqui também.
-    crate::migration::migrate_plaintext_account_fields(&conn, &dek)?;
+    crate::migration::migrate_plaintext_account_fields(conn, &dek)?;
 
-    state.set_dek(dek);
+    Ok(RecoveryAttemptResult {
+        outcome: RecoveryOutcome { success: true, message: "Identidade confirmada.".to_string() },
+        dek: Some(dek),
+    })
+}
 
-    Ok(RecoveryOutcome { success: true, message: "Identidade confirmada.".to_string() })
+#[tauri::command]
+pub fn attempt_vault_recovery(app: AppHandle, state: State<VaultState>, answers: Vec<RecoveryAnswer>) -> Result<RecoveryOutcome, String> {
+    let conn = db::open(&app)?;
+    let result = attempt_recovery_core(&conn, &answers)?;
+    if let Some(dek) = result.dek {
+        state.set_dek(dek);
+    }
+    Ok(result.outcome)
 }
 
 #[tauri::command]
@@ -386,4 +414,202 @@ pub fn reset_master_password_after_recovery(app: AppHandle, state: State<VaultSt
 
 pub fn compute_dek_check(dek: &[u8; 32]) -> Result<Vec<u8>, String> {
     crypto::encrypt(dek, DEK_CHECK_PLAINTEXT).map_err(|_| "Falha ao preparar verificação da DEK.".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Parâmetros reduzidos apenas para os testes rodarem rápido (mesmo padrão de
+    // `vault::tests::fixture_conn_with_password`/`crypto::tests::test_params`); produção usa
+    // `KdfParams::default()`.
+    fn test_params() -> KdfParams {
+        KdfParams { memory_kib: 8 * 1024, iterations: 1, parallelism: 1 }
+    }
+
+    /// Monta um cofre sintético completo (vault_meta + N perguntas de segurança reais, cifradas
+    /// com o mesmo Shamir Secret Sharing usado em produção) para exercitar `attempt_recovery_core`
+    /// de ponta a ponta, sem precisar de `AppHandle`/`State` reais — mesmo padrão já estabelecido
+    /// em `vault::tests`/`properties::tests`. Retorna `(conn, dek, [(id, resposta_correta); N])`.
+    fn fixture_vault_with_questions(answers: &[&str]) -> (rusqlite::Connection, [u8; 32], Vec<(i64, String)>) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+
+        let dek = [7u8; 32];
+        let dek_check = compute_dek_check(&dek).unwrap();
+        conn.execute(
+            "INSERT INTO vault_meta (id, kdf_salt, kdf_params, wrapped_dek, dek_check, created_at) VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                crypto::random_bytes(crypto::SALT_LEN),
+                serde_json::to_string(&test_params()).unwrap(),
+                // wrapped_dek não é usado por este fluxo de recuperação (só pela senha mestra),
+                // mas a coluna é NOT NULL — qualquer ciphertext válido serve de placeholder aqui.
+                crypto::encrypt(&dek, &dek).unwrap(),
+                dek_check,
+                db::now_iso(),
+            ],
+        )
+        .unwrap();
+
+        let mut ids = Vec::new();
+        for (index, answer) in answers.iter().enumerate() {
+            let share_index = (index + 1) as i64;
+            let share_bytes = share_for_index(&dek, share_index);
+            // Mesma lógica de `wrap_share`, mas com `test_params()` em vez de
+            // `KdfParams::default()` para o teste não levar ~300-500ms por pergunta.
+            let salt = crypto::random_bytes(crypto::SALT_LEN);
+            let key = crypto::derive_key(&normalize_answer(answer), &salt, &test_params()).unwrap();
+            let wrapped = crypto::encrypt(&key, &share_bytes).unwrap();
+            let params_json = serde_json::to_string(&test_params()).unwrap();
+            conn.execute(
+                "INSERT INTO security_questions (question, share_index, answer_salt, kdf_params, wrapped_share, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![format!("Pergunta {index}?"), share_index, salt, params_json, wrapped, db::now_iso()],
+            )
+            .unwrap();
+            ids.push((conn.last_insert_rowid(), answer.to_string()));
+        }
+
+        conn.execute("INSERT OR IGNORE INTO recovery_attempts (id, failed_count, locked_until) VALUES (1, 0, NULL)", []).ok();
+        (conn, dek, ids)
+    }
+
+    fn answer_of(ids: &[(i64, String)], index: usize, text: &str) -> RecoveryAnswer {
+        RecoveryAnswer { id: ids[index].0, answer: Zeroizing::new(text.to_string()) }
+    }
+
+    // Seção 18/54 do pedido de validação final: 3 respostas corretas (de N >= 3 perguntas
+    // cadastradas) devem reconstruir exatamente a mesma DEK que protege as senhas/notes/2FA do
+    // cofre — não uma DEK "parecida" nem um bypass que aceite qualquer coisa.
+    #[test]
+    fn correct_answers_reconstruct_the_real_dek() {
+        let (conn, dek, ids) = fixture_vault_with_questions(&["São Paulo", "Rex", "Azul"]);
+        let answers = vec![answer_of(&ids, 0, "São Paulo"), answer_of(&ids, 1, "Rex"), answer_of(&ids, 2, "Azul")];
+
+        let result = attempt_recovery_core(&conn, &answers).unwrap();
+        assert!(result.outcome.success);
+        assert_eq!(result.dek, Some(dek), "a DEK reconstruída via perguntas deve ser IDÊNTICA à DEK real do cofre");
+    }
+
+    // Respostas normalizadas (trim + lowercase) — capitalização/espaços não podem impedir uma
+    // recuperação legítima.
+    #[test]
+    fn answers_are_normalized_before_checking() {
+        let (conn, dek, ids) = fixture_vault_with_questions(&["São Paulo", "Rex", "Azul"]);
+        let answers = vec![answer_of(&ids, 0, "  SÃO PAULO  "), answer_of(&ids, 1, "rex"), answer_of(&ids, 2, "AZUL")];
+
+        let result = attempt_recovery_core(&conn, &answers).unwrap();
+        assert!(result.outcome.success);
+        assert_eq!(result.dek, Some(dek));
+    }
+
+    // Seção 18 do pedido: resposta errada é rejeitada de forma limpa — sem reconstruir uma DEK
+    // parcial/incorreta, sem corromper `recovery_attempts`, sem mudar `vault_meta`.
+    #[test]
+    fn wrong_answer_is_rejected_cleanly_without_altering_state() {
+        let (conn, _dek, ids) = fixture_vault_with_questions(&["São Paulo", "Rex", "Azul"]);
+        let answers = vec![answer_of(&ids, 0, "Rio de Janeiro"), answer_of(&ids, 1, "Rex"), answer_of(&ids, 2, "Azul")];
+
+        let dek_check_before: Vec<u8> =
+            conn.query_row("SELECT dek_check FROM vault_meta WHERE id = 1", [], |r| r.get(0)).unwrap();
+
+        let result = attempt_recovery_core(&conn, &answers).unwrap();
+        assert!(!result.outcome.success);
+        assert!(result.dek.is_none());
+
+        let dek_check_after: Vec<u8> =
+            conn.query_row("SELECT dek_check FROM vault_meta WHERE id = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(dek_check_before, dek_check_after, "uma tentativa incorreta não pode alterar vault_meta");
+    }
+
+    // Respostas parcialmente corretas (só 2 de 3, abaixo do limiar Shamir) devem falhar do mesmo
+    // jeito que todas erradas — não existe "quase recuperado".
+    #[test]
+    fn partially_correct_answers_below_threshold_are_rejected() {
+        let (conn, _dek, ids) = fixture_vault_with_questions(&["São Paulo", "Rex", "Azul"]);
+        let answers = vec![answer_of(&ids, 0, "São Paulo"), answer_of(&ids, 1, "Rex"), answer_of(&ids, 2, "Verde")];
+
+        let result = attempt_recovery_core(&conn, &answers).unwrap();
+        assert!(!result.outcome.success, "2 de 3 corretas (abaixo do limiar de 3) não pode recuperar o cofre");
+        assert!(result.dek.is_none());
+    }
+
+    // Seção 18/24 do pedido: 5 tentativas incorretas seguidas devem bloquear tentativas
+    // subsequentes por um tempo (mensagem explícita de "tente novamente em N minutos"), mesmo que
+    // a 6a tentativa use as respostas CORRETAS — o lockout é por tempo, não descontado por acerto.
+    #[test]
+    fn five_failed_attempts_lock_out_even_a_subsequent_correct_attempt() {
+        let (conn, _dek, ids) = fixture_vault_with_questions(&["São Paulo", "Rex", "Azul"]);
+        let wrong = vec![answer_of(&ids, 0, "errada"), answer_of(&ids, 1, "errada"), answer_of(&ids, 2, "errada")];
+
+        for attempt in 1..=5 {
+            let result = attempt_recovery_core(&conn, &wrong).unwrap();
+            assert!(!result.outcome.success, "tentativa {attempt} deveria falhar (resposta errada)");
+        }
+
+        let (failed_count, locked_until) = recovery_lock_status(&conn).unwrap();
+        assert_eq!(failed_count, 0, "o contador é zerado no momento em que o lockout começa");
+        assert!(locked_until.is_some(), "5 falhas consecutivas devem ativar o lockout temporário");
+
+        let correct = vec![answer_of(&ids, 0, "São Paulo"), answer_of(&ids, 1, "Rex"), answer_of(&ids, 2, "Azul")];
+        let result = attempt_recovery_core(&conn, &correct).unwrap();
+        assert!(!result.outcome.success, "mesmo respostas corretas devem ser recusadas durante o lockout");
+        assert!(result.outcome.message.contains("Tente novamente"));
+        assert!(result.dek.is_none());
+    }
+
+    // Depois que `locked_until` já passou (simulado escrevendo uma data no passado — equivalente
+    // a esperar os 15 minutos de verdade), a próxima tentativa correta deve funcionar normalmente.
+    #[test]
+    fn lockout_expires_and_correct_answers_work_again_after_the_window() {
+        let (conn, dek, ids) = fixture_vault_with_questions(&["São Paulo", "Rex", "Azul"]);
+        let wrong = vec![answer_of(&ids, 0, "errada"), answer_of(&ids, 1, "errada"), answer_of(&ids, 2, "errada")];
+        for _ in 1..=5 {
+            attempt_recovery_core(&conn, &wrong).unwrap();
+        }
+        let (_, locked_until) = recovery_lock_status(&conn).unwrap();
+        assert!(locked_until.is_some());
+
+        // Simula o relógio já ter passado do horário de desbloqueio (equivalente a "restart" após
+        // esperar a janela, seção 18 do pedido) sem precisar dormir 15 minutos de verdade no teste.
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        conn.execute("UPDATE recovery_attempts SET locked_until = ?1 WHERE id = 1", [past]).unwrap();
+
+        let correct = vec![answer_of(&ids, 0, "São Paulo"), answer_of(&ids, 1, "Rex"), answer_of(&ids, 2, "Azul")];
+        let result = attempt_recovery_core(&conn, &correct).unwrap();
+        assert!(result.outcome.success, "depois que a janela de lockout expira, respostas corretas devem funcionar de novo");
+        assert_eq!(result.dek, Some(dek));
+    }
+
+    // Seção 19 do pedido ("Master Password Change"), aplicado ao caminho de recuperação: depois
+    // de reconstruir a DEK via perguntas e redefinir a senha mestra, a senha ANTIGA não pode mais
+    // abrir o cofre, a NOVA deve funcionar, e a DEK (logo, todos os segredos já cifrados com ela)
+    // continua exatamente a mesma — nenhuma recriptografia/corrupção.
+    #[test]
+    fn reset_master_password_after_recovery_invalidates_old_password_and_keeps_the_same_dek() {
+        let (conn, dek, ids) = fixture_vault_with_questions(&["São Paulo", "Rex", "Azul"]);
+        let answers = vec![answer_of(&ids, 0, "São Paulo"), answer_of(&ids, 1, "Rex"), answer_of(&ids, 2, "Azul")];
+        let recovered = attempt_recovery_core(&conn, &answers).unwrap();
+        let recovered_dek = recovered.dek.expect("recuperação deveria ter sucesso neste teste");
+        assert_eq!(recovered_dek, dek);
+
+        // Mesma lógica de `reset_master_password_after_recovery`, exercitada diretamente sobre a
+        // DEK recuperada (sem precisar de `State`/`AppHandle` reais).
+        let new_password = Zeroizing::new("nova-senha-mestra-XSS_TEST".to_string());
+        let new_salt = crypto::random_bytes(crypto::SALT_LEN);
+        let new_params = test_params();
+        let new_kek = crypto::derive_key(&new_password, &new_salt, &new_params).unwrap();
+        let new_wrapped_dek = crypto::encrypt(&new_kek, &recovered_dek).unwrap();
+        conn.execute(
+            "UPDATE vault_meta SET kdf_salt = ?1, kdf_params = ?2, wrapped_dek = ?3 WHERE id = 1",
+            rusqlite::params![new_salt, serde_json::to_string(&new_params).unwrap(), new_wrapped_dek],
+        )
+        .unwrap();
+
+        // Senha antiga: nunca existiu de verdade neste fixture (a recuperação não passa pela
+        // senha mestra), mas qualquer senha candidata que não seja a nova deve falhar.
+        assert!(crate::commands::vault::verify_current_password(&conn, &Zeroizing::new("senha-antiga-qualquer".to_string())).is_err());
+        // Senha nova funciona e devolve exatamente a mesma DEK que já protegia os dados.
+        let dek_after = crate::commands::vault::verify_current_password(&conn, &new_password).unwrap();
+        assert_eq!(dek_after, dek, "trocar a senha mestra após recuperação não pode mudar a DEK nem corromper os dados já cifrados");
+    }
 }

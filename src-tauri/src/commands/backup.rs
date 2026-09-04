@@ -14,6 +14,7 @@ const MAGIC: &[u8; 8] = b"VLTBKUP1";
 /// os arquivos de imagem em si não viajam dentro do backup (ver SECURITY_AUDIT.md).
 const BACKUP_TABLES: &[&str] = &[
     "platforms",
+    "platform_seed_state",
     "images",
     "projects",
     "custom_property_definitions",
@@ -33,6 +34,10 @@ const BACKUP_TABLES: &[&str] = &[
 struct BackupPayload {
     vault_meta: Value,
     platforms: Vec<Value>,
+    // `#[serde(default)]`: backups gerados antes desta tabela existir não têm esta chave no JSON
+    // — sem o default, restaurar um backup antigo falharia na desserialização inteira do arquivo.
+    #[serde(default)]
+    platform_seed_state: Vec<Value>,
     images: Vec<Value>,
     projects: Vec<Value>,
     custom_property_definitions: Vec<Value>,
@@ -52,6 +57,7 @@ impl BackupPayload {
     fn rows_for(&self, table: &str) -> &[Value] {
         match table {
             "platforms" => &self.platforms,
+            "platform_seed_state" => &self.platform_seed_state,
             "images" => &self.images,
             "projects" => &self.projects,
             "custom_property_definitions" => &self.custom_property_definitions,
@@ -107,6 +113,7 @@ fn build_backup_payload(conn: &Connection) -> Result<BackupPayload, String> {
     Ok(BackupPayload {
         vault_meta,
         platforms: rows_to_json(conn, "SELECT * FROM platforms")?,
+        platform_seed_state: rows_to_json(conn, "SELECT * FROM platform_seed_state")?,
         images: rows_to_json(conn, "SELECT * FROM images")?,
         projects: rows_to_json(conn, "SELECT * FROM projects")?,
         custom_property_definitions: rows_to_json(conn, "SELECT * FROM custom_property_definitions")?,
@@ -139,6 +146,7 @@ fn restore_backup_payload(conn: &Connection, payload: &BackupPayload) -> Result<
          DELETE FROM projects;
          DELETE FROM images;
          DELETE FROM tags;
+         DELETE FROM platform_seed_state;
          DELETE FROM platforms;
          DELETE FROM settings;
          DELETE FROM vault_meta;",
@@ -256,7 +264,15 @@ fn allowed_columns(table: &str) -> &'static [&'static str] {
         ],
         "platforms" => &[
             "id", "name", "icon", "login_url", "website_url", "is_custom", "created_at", "logo_image_id",
+            // `sort_order` já existia na tabela mas faltava aqui — sem ele, restaurar QUALQUER
+            // backup com plataformas falhava inteiro, já que `insert_rows` rejeita a linha
+            // inteira se ela tiver uma chave fora da lista (achado ao adicionar `system_key`
+            // abaixo; corrigido de brinde, mesmo bug afetando `projects` logo adiante).
+            "sort_order",
+            // Identificador estável das plataformas oficiais (ver `db::PLATFORM_SEEDS`).
+            "system_key",
         ],
+        "platform_seed_state" => &["system_key", "status", "updated_at"],
         "accounts" => &[
             "id", "name", "platform_id", "category", "username", "email", "encrypted_password",
             "login_url", "website_url", "notes", "favorite", "created_at", "updated_at",
@@ -269,6 +285,7 @@ fn allowed_columns(table: &str) -> &'static [&'static str] {
         "images" => &["id", "filename", "original_name", "hash", "created_at", "name"],
         "projects" => &[
             "id", "name", "description", "color", "avatar_image_id", "favorite", "notes", "created_at", "updated_at",
+            "sort_order",
         ],
         "custom_property_definitions" => &["id", "name", "type", "created_at"],
         "account_projects" => &["account_id", "project_id"],

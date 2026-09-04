@@ -46,6 +46,10 @@ pub fn verify_current_password(conn: &rusqlite::Connection, password: &Zeroizing
 pub fn vault_status(app: AppHandle, state: State<VaultState>) -> Result<VaultStatus, String> {
     let conn = db::open(&app)?;
     db::init_schema(&conn)?;
+    // Chamado a cada início do app (mesmo antes do desbloqueio) — é aqui que uma instalação
+    // nova ganha as imagens padrão das plataformas oficiais, e onde uma instalação existente
+    // "cura" qualquer logo padrão que ainda esteja pendente (ver db::provision_default_platform_images).
+    db::provision_default_platform_images(&app, &conn)?;
     let initialized: bool = conn
         .query_row("SELECT COUNT(*) FROM vault_meta WHERE id = 1", [], |row| {
             row.get::<_, i64>(0)
@@ -67,6 +71,7 @@ pub fn create_vault(app: AppHandle, state: State<VaultState>, password: String) 
     }
     let conn = db::open(&app)?;
     db::init_schema(&conn)?;
+    db::provision_default_platform_images(&app, &conn)?;
 
     let existing: i64 = conn
         .query_row("SELECT COUNT(*) FROM vault_meta WHERE id = 1", [], |row| row.get(0))

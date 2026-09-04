@@ -8,6 +8,8 @@ export interface Platform {
   logo_image_id: number | null;
   created_at: string;
   sort_order: number;
+  /** Identificador estável de uma plataforma oficial do Cofre (ver src-tauri/src/db.rs); null para plataformas criadas pelo usuário. */
+  system_key: string | null;
 }
 
 export interface Tag {

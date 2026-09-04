@@ -1,7 +1,7 @@
 use crate::db;
 use crate::state::VaultState;
 use crate::validate;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
@@ -27,6 +27,10 @@ pub struct Platform {
     pub logo_image_id: Option<i64>,
     pub created_at: String,
     pub sort_order: i64,
+    /// Identificador estável da plataforma oficial (ver `db::PLATFORM_SEEDS`); `None` para
+    /// qualquer plataforma criada pelo usuário. Nunca é definido por `create_platform`/
+    /// `update_platform` — só a semeadura de defaults grava este campo.
+    pub system_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +53,7 @@ fn map_platform(row: &rusqlite::Row) -> rusqlite::Result<Platform> {
         created_at: row.get(6)?,
         logo_image_id: row.get(7)?,
         sort_order: row.get(8)?,
+        system_key: row.get(9)?,
     })
 }
 
@@ -82,7 +87,7 @@ pub fn list_platforms(app: AppHandle, state: State<VaultState>) -> Result<Vec<Pl
     let conn = db::open(&app)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, icon, login_url, website_url, is_custom, created_at, logo_image_id, sort_order \
+            "SELECT id, name, icon, login_url, website_url, is_custom, created_at, logo_image_id, sort_order, system_key \
              FROM platforms ORDER BY sort_order ASC, is_custom ASC, name ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -142,7 +147,17 @@ pub fn delete_platform(app: AppHandle, state: State<VaultState>, id: i64) -> Res
     require_unlocked(&state)?;
     validate::positive_id(id, "id")?;
     let conn = db::open(&app)?;
+    // Se for uma plataforma oficial (tem system_key), registra a exclusão antes de apagar a
+    // linha — sem isso, a próxima inicialização recriaria a plataforma que o usuário decidiu
+    // remover (ver db::mark_platform_seed_removed e seção 18 do pedido de ajuste).
+    let system_key: Option<String> = conn
+        .query_row("SELECT system_key FROM platforms WHERE id = ?1", [id], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM platforms WHERE id = ?1", [id]).map_err(|e| e.to_string())?;
+    if let Some(key) = system_key {
+        db::mark_platform_seed_removed(&conn, &key)?;
+    }
     Ok(())
 }
 
